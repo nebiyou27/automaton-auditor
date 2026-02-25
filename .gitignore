@@ -1,12 +1,7 @@
-﻿# Environment
 .env
-venv/
-.venv/
-
-# Python cache
 __pycache__/
 *.pyc
-
-# Build and tooling
-.pytest_cache/
-.mypy_cache/
+.venv/
+venv/
+.vscode/
+*.log

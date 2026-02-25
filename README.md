@@ -1,86 +1,167 @@
 ﻿# Automaton Auditor
 
-Autonomous repository governance using a LangGraph swarm and a digital courtroom workflow.
+Automaton Auditor is a LangGraph-based, multi-agent auditing pipeline that evaluates a GitHub repository (and optionally a PDF report) against a rubric.
 
-## Refined Project Structure
+It uses a "Digital Courtroom" pattern:
+- Detectives collect factual evidence.
+- Judges score rubric criteria from different personas.
+- Chief Justice produces a deterministic final report.
+
+## Project Structure
 
 ```text
 automaton-auditor/
-├── .env.example
-├── .gitignore
-├── README.md
-├── requirements.txt
-├── create_structure.py
-├── main.py
-├── src/
-│   ├── __init__.py
-│   ├── state.py
-│   ├── graph.py
-│   ├── nodes/
-│   │   ├── __init__.py
-│   │   ├── detectives.py
-│   │   ├── judges.py
-│   │   └── justice.py
-│   └── tools/
-│       ├── __init__.py
-│       └── repo_tools.py
-├── rubric/
-│   └── week2_rubric.json
-├── audit/
-│   ├── report_onself_generated/
-│   ├── report_onpeer_generated/
-│   ├── report_bypeer_received/
-│   └── langsmith_logs/
-└── tests/
-    └── .gitkeep
+|- main.py
+|- requirements.txt
+|- .env.example
+|- rubric/
+|  \- week2_rubric.json
+|- src/
+|  |- graph.py
+|  |- state.py
+|  |- tools/
+|  |  \- repo_tools.py
+|  \- nodes/
+|     |- detectives.py
+|     |- aggregator.py
+|     |- judges.py
+|     |- justice.py
+|     \- skip.py
+|- audit/
+|  |- langsmith_logs/
+|  |- report_bypeer_received/
+|  |- report_onpeer_generated/
+|  \- report_onself_generated/
+\- tests/
 ```
 
-> The structure is generated programmatically to keep architecture reproducible and consistent.
+## Architecture
 
-## Quick Start
+Execution flow (from `src/graph.py`):
+1. `repo_investigator` runs from `START`.
+2. `doc_analyst` runs if `pdf_path` is provided; otherwise `skip_doc_analyst`.
+3. Both paths fan-in at `evidence_aggregator`.
+4. Three judge nodes run in parallel:
+   - `prosecutor`
+   - `defense`
+   - `techlead`
+5. Fan-in to `chief_justice` for deterministic final synthesis.
 
-```bash
-python create_structure.py
+## Core Components
+
+- `src/state.py`
+  - Defines:
+    - `Evidence` (facts only)
+    - `JudicialOpinion` (scores + arguments)
+    - `AgentState` (shared LangGraph state)
+  - Uses reducers for parallel safety:
+    - `operator.ior` for evidence bucket merge
+    - `operator.add` for opinion list merge
+
+- `src/nodes/detectives.py`
+  - `repo_investigator`: clones repo, checks files, reads git history, performs AST checks.
+  - `doc_analyst`: ingests/query PDF into chunked evidence.
+
+- `src/nodes/judges.py`
+  - Uses local Ollama model (default `deepseek-r1:8b`) via `langchain_ollama`.
+  - Generates structured JSON opinions per rubric criterion.
+
+- `src/nodes/justice.py`
+  - Resolves disagreements deterministically.
+  - Produces markdown final verdict and remediation checklist.
+
+- `src/tools/repo_tools.py`
+  - Sandboxed git clone/history tools.
+  - AST-based code analysis utilities.
+  - PDF chunking and lexical query helpers.
+
+## Prerequisites
+
+- Python 3.11+ (3.12 recommended)
+- Git installed and available in PATH
+- Ollama running locally for judge nodes
+
+### Ollama setup
+
+Install and start Ollama, then pull the model used by default:
+
+```powershell
+ollama pull deepseek-r1:8b
+```
+
+If you use another model, update `.env` (`OLLAMA_MODEL`).
+
+## Setup
+
+1. Create and activate a virtual environment.
+
+```powershell
 python -m venv venv
-venv\Scripts\activate
+.\venv\Scripts\Activate.ps1
+```
+
+2. Install dependencies.
+
+```powershell
 pip install -r requirements.txt
 ```
 
-## Environment Setup
+3. Create your env file.
 
-Copy `.env.example` to `.env` and configure:
-
-```env
-GEMINI_API_KEY=your_key_here
-LANGCHAIN_API_KEY=your_langsmith_key_here
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=automaton-auditor
+```powershell
+Copy-Item .env.example .env
 ```
 
-## Architecture Overview
+4. Update `.env` if needed:
+- `OLLAMA_BASE_URL` (default `http://localhost:11434`)
+- `OLLAMA_MODEL` (default `deepseek-r1:8b`)
+- `LANGCHAIN_API_KEY` (optional; if empty, tracing is disabled in `main.py`)
 
-1. Detective layer (parallel evidence collection): `RepoInvestigator`, `DocAnalyst`, optional vision inspector.
-2. Evidence aggregation (fan-in synchronization).
-3. Judicial bench (parallel reasoning): Prosecutor, Defense, Tech Lead.
-4. Chief Justice: deterministic conflict resolution + final markdown report.
-
-## Running the Auditor
-
-Set target inputs in `main.py`:
-
-```python
-repo_url = "https://github.com/target/repository"
-pdf_path = "path_to_report.pdf"
-```
+## Running
 
 Run:
 
-```bash
+```powershell
 python main.py
 ```
 
-Generated reports are written to `audit/report_onself_generated/`.
+By default, `main.py` uses:
+- `repo_url = "https://github.com/nebiyou27/automaton-auditor.git"`
+- `pdf_path = ""` (PDF disabled)
+- `rubric_path = "rubric/week2_rubric.json"`
 
-## Observability
+Edit these in `main.py` to audit another repo or include a local PDF path.
 
-If `LANGCHAIN_TRACING_V2=true`, execution traces are available in LangSmith for full auditability.
+## Input/Output State
+
+Initial graph input keys:
+- `repo_url`
+- `pdf_path`
+- `rubric_path`
+- `evidences`
+- `opinions`
+- `final_report`
+
+Primary outputs printed by `main.py`:
+- Final state keys
+- Final markdown report (`final_report`)
+- Evidence bucket counts
+
+## Rubric
+
+Rubric is loaded from:
+- `rubric/week2_rubric.json`
+
+Current dimensions include:
+- typed state definitions
+- forensic tool engineering
+- detective node implementation
+- partial graph orchestration
+- project infrastructure
+- judicial nuance & dialectics
+
+## Notes
+
+- `tests/` currently contains only a placeholder (`.gitkeep`).
+- `audit/` contains output/log folders (also placeholder-tracked).
+- If `pdf_path` is empty, the graph safely routes through `skip_doc_analyst` to preserve fan-in behavior.

@@ -42,6 +42,34 @@ def _evidence(
     )
 
 
+def _extract_reducer_snippet(state_file_path: str, max_lines: int = 25) -> str | None:
+    """
+    Pull only the lines that prove reducers are wired correctly.
+    This makes judges cite the *exact* reducer assignments (ior for evidences, add for opinions).
+    """
+    try:
+        with open(state_file_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+        keep: List[str] = []
+        for ln in lines:
+            s = ln.strip()
+            if (
+                "evidences:" in s
+                or "opinions:" in s
+                or "Annotated[" in s
+                or "operator.ior" in s
+                or "operator.add" in s
+            ):
+                keep.append(ln.rstrip("\n"))
+
+        if not keep:
+            return None
+        return "\n".join(keep[:max_lines])
+    except Exception:
+        return None
+
+
 def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]:
     """
     RepoInvestigator (Detective):
@@ -49,6 +77,8 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
     - Check for expected files
     - Extract git history facts (count + preview)
     - Run AST structural checks on src/graph.py and src/state.py (if present)
+    - Provide line-level reducer snippet evidence (operator.ior vs operator.add)
+    - Provide explicit tool-safety/tool-capability evidence (no os.system, PDF chunking, tempfile usage)
 
     Returns ONLY factual Evidence objects (no scoring, no verdict language).
     """
@@ -87,6 +117,8 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
         "src/nodes/detectives.py",
         "src/nodes/judges.py",
         "src/nodes/justice.py",
+        "src/nodes/aggregator.py",
+        "src/nodes/skip.py",
         "src/tools/repo_tools.py",
         "rubric/week2_rubric.json",
         "README.md",
@@ -154,7 +186,6 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
                     location="src/graph.py",
                     rationale="Parsed src/graph.py using AST traversal.",
                     content=str(graph_res.data)[:900],
-                    confidence=1.0,
                 )
             )
         else:
@@ -188,7 +219,6 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
                     location="src/state.py",
                     rationale="Parsed src/state.py using AST traversal.",
                     content=str(state_res.data)[:900],
-                    confidence=1.0,
                 )
             )
         else:
@@ -200,6 +230,19 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
                     rationale=state_res.error or "AST state analysis failed.",
                 )
             )
+
+        # --- Reducer snippet (line-level proof) ---
+        reducer_snip = _extract_reducer_snippet(state_file)
+        evidences.append(
+            _evidence(
+                goal="Extract reducer wiring snippet from src/state.py (operator.ior for evidences, operator.add for opinions)",
+                found=bool(reducer_snip),
+                location="src/state.py",
+                rationale="Extracted relevant lines showing reducer assignments for parallel-safe merges.",
+                content=reducer_snip,
+            )
+        )
+
     else:
         evidences.append(
             _evidence(
@@ -207,6 +250,84 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
                 found=False,
                 location="src/state.py",
                 rationale="File missing in repository; AST analysis skipped.",
+            )
+        )
+        evidences.append(
+            _evidence(
+                goal="Extract reducer wiring snippet from src/state.py (operator.ior for evidences, operator.add for opinions)",
+                found=False,
+                location="src/state.py",
+                rationale="File missing in repository; reducer snippet extraction skipped.",
+            )
+        )
+
+    # --- Tool safety & capability checks (facts) ---
+    tools_file = os.path.join(repo_path, "src", "tools", "repo_tools.py")
+    if os.path.exists(tools_file):
+        try:
+            with open(tools_file, "r", encoding="utf-8", errors="ignore") as f:
+                tools_src = f.read()
+
+            has_os_system = "os.system(" in tools_src
+            has_tempfile = "tempfile" in tools_src
+            has_pdf_reader = ("PdfReader" in tools_src) or ("PyPDF2" in tools_src)
+            has_chunking = ("chunk_size" in tools_src) and ("chunk_overlap" in tools_src)
+            has_query_fn = "query_pdf_chunks" in tools_src
+
+            evidences.append(
+                _evidence(
+                    goal="Check tool safety: ensure no os.system() usage in src/tools/repo_tools.py",
+                    found=not has_os_system,
+                    location="src/tools/repo_tools.py",
+                    rationale="Direct source scan for forbidden os.system() call signature.",
+                    content="os.system() NOT found" if not has_os_system else "os.system() FOUND",
+                )
+            )
+
+            evidences.append(
+                _evidence(
+                    goal="Verify tool sandboxing signals exist (tempfile usage in clone tooling)",
+                    found=has_tempfile,
+                    location="src/tools/repo_tools.py",
+                    rationale="Direct source scan for tempfile usage indicating sandboxed operations.",
+                )
+            )
+
+            evidences.append(
+                _evidence(
+                    goal="Verify PDF ingestion capability exists (PdfReader/PyPDF2 usage present)",
+                    found=has_pdf_reader,
+                    location="src/tools/repo_tools.py",
+                    rationale="Direct source scan for PDF reader usage.",
+                )
+            )
+
+            evidences.append(
+                _evidence(
+                    goal="Verify PDF chunking + query functions exist (RAG-lite interface)",
+                    found=bool(has_chunking and has_query_fn),
+                    location="src/tools/repo_tools.py",
+                    rationale="Direct source scan for chunk_size/chunk_overlap and query_pdf_chunks function name.",
+                    content=f"chunking={has_chunking}, query_fn={has_query_fn}",
+                )
+            )
+
+        except Exception as e:
+            evidences.append(
+                _evidence(
+                    goal="Check tool safety/capabilities in src/tools/repo_tools.py",
+                    found=False,
+                    location="src/tools/repo_tools.py",
+                    rationale=f"Failed to read tools source for verification: {e!r}",
+                )
+            )
+    else:
+        evidences.append(
+            _evidence(
+                goal="Check tool safety/capabilities in src/tools/repo_tools.py",
+                found=False,
+                location="src/tools/repo_tools.py",
+                rationale="Tools file missing in repository; tool verification skipped.",
             )
         )
 
@@ -298,7 +419,6 @@ def doc_analyst(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]:
                 location=pdf_path,
                 rationale="Lexical query over chunked PDF index; returns matching chunk_ids/pages.",
                 content=snippet,
-                confidence=1.0,
             )
         )
 

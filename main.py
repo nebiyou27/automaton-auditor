@@ -1,7 +1,14 @@
+import os
+
 from dotenv import load_dotenv
 
 # Load .env BEFORE importing anything that initializes LLMs at import-time
 load_dotenv()
+
+if not (os.getenv("LANGCHAIN_API_KEY") or "").strip():
+    # Prevent LangSmith 401 retries when running locally without a key.
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    os.environ["LANGSMITH_TRACING"] = "false"
 
 from src.graph import build_graph  # noqa: E402
 
