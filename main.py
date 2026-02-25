@@ -1,11 +1,13 @@
 from dotenv import load_dotenv
-from src.graph import build_graph
 
+# Load .env BEFORE importing anything that initializes LLMs at import-time
 load_dotenv()
+
+from src.graph import build_graph  # noqa: E402
 
 
 def main():
-    repo_url = "https://github.com/nebiyou27/automaton-auditor.git"  # Example target
+    repo_url = "https://github.com/nebiyou27/automaton-auditor.git"
     pdf_path = ""  # Optional
 
     graph = build_graph()
