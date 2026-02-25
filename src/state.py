@@ -2,7 +2,7 @@ import operator
 from typing import Annotated, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class Evidence(BaseModel):
@@ -50,8 +50,7 @@ class AgentState(TypedDict):
     repo_url: str
     pdf_path: str
 
-    # Optional: store rubric path or parsed rubric dimensions later
-    rubric_path: str
+    rubric_path: NotRequired[str]
 
     evidences: Annotated[
         Dict[str, List[Evidence]],
