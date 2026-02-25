@@ -1,0 +1,38 @@
+{
+  "rubric_metadata": {
+    "rubric_name": "Week 2: Automaton Auditor",
+    "version": "1.0.0"
+  },
+  "dimensions": [
+    {
+      "id": "typed_state_definitions",
+      "name": "Typed State Definitions",
+      "forensic_instruction": "Verify Pydantic BaseModel/TypedDict usage and reducers (operator.add/operator.ior) for parallel-safe merges."
+    },
+    {
+      "id": "forensic_tool_engineering",
+      "name": "Forensic Tool Engineering",
+      "forensic_instruction": "Verify sandboxed git ops, AST-based parsing, PDF chunking/query, error handling, and no os.system calls."
+    },
+    {
+      "id": "detective_node_implementation",
+      "name": "Detective Node Implementation",
+      "forensic_instruction": "Verify detective nodes return structured Evidence objects, handle missing artifacts gracefully, and remain factual."
+    },
+    {
+      "id": "partial_graph_orchestration",
+      "name": "Partial Graph Orchestration",
+      "forensic_instruction": "Verify fan-out detectives + fan-in aggregation with conditional edges and runnable compilation."
+    },
+    {
+      "id": "project_infrastructure",
+      "name": "Project Infrastructure",
+      "forensic_instruction": "Verify reproducible setup: dependencies, .env.example, README instructions, clean structure, no secrets committed."
+    },
+    {
+      "id": "judicial_nuance_dialectics",
+      "name": "Judicial Nuance & Dialectics",
+      "forensic_instruction": "Verify distinct judge personas, structured outputs, and opinions mapped to rubric criteria IDs."
+    }
+  ]
+}
