@@ -12,7 +12,9 @@ It uses a "Digital Courtroom" pattern:
 ```text
 automaton-auditor/
 |- main.py
+|- pyproject.toml
 |- requirements.txt
+|- requirements.lock
 |- .env.example
 |- rubric/
 |  \- week2_rubric.json
@@ -80,6 +82,7 @@ Execution flow (from `src/graph.py`):
 - Python 3.11+ (3.12 recommended)
 - Git installed and available in PATH
 - Ollama running locally for judge nodes
+- `uv` installed (recommended for lockfile-based reproducibility)
 
 ### Ollama setup
 
@@ -100,7 +103,13 @@ python -m venv venv
 .\venv\Scripts\Activate.ps1
 ```
 
-2. Install dependencies.
+2. Install dependencies (recommended: `uv` lock-based sync).
+
+```powershell
+uv sync --frozen
+```
+
+If you prefer `pip`, install from the pinned lock:
 
 ```powershell
 pip install -r requirements.txt
@@ -116,6 +125,19 @@ Copy-Item .env.example .env
 - `OLLAMA_BASE_URL` (default `http://localhost:11434`)
 - `OLLAMA_MODEL` (default `deepseek-r1:8b`)
 - `LANGCHAIN_API_KEY` (optional; if empty, tracing is disabled in `main.py`)
+
+## Dependency Management
+
+- `pyproject.toml` is the canonical project metadata and dependency declaration.
+- `requirements.lock` contains fully pinned runtime transitive dependencies for deterministic pip installs.
+- `requirements.txt` is a compatibility shim that points to `requirements.lock`.
+
+Regenerate lock artifacts after dependency updates:
+
+```powershell
+uv lock
+uv export --frozen --no-dev --format requirements-txt -o requirements.lock
+```
 
 ## Running
 
@@ -165,3 +187,4 @@ Current dimensions include:
 - `tests/` currently contains only a placeholder (`.gitkeep`).
 - `audit/` contains output/log folders (also placeholder-tracked).
 - If `pdf_path` is empty, the graph safely routes through `skip_doc_analyst` to preserve fan-in behavior.
+- Commit lockfile updates together with `pyproject.toml` changes to keep environments reproducible.
