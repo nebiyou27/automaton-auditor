@@ -165,6 +165,7 @@ def _extract_json_array(raw: str) -> list:
     Best-effort extraction of model output supporting:
     - direct JSON array
     - object wrapper: {"opinions": [...]}
+    - single opinion object: {...}
     """
     raw = _strip_think_and_noise(raw)
 
@@ -177,6 +178,10 @@ def _extract_json_array(raw: str) -> list:
             opinions = parsed.get("opinions")
             if isinstance(opinions, list):
                 return opinions
+            # Some Ollama model outputs return a single object despite array instructions.
+            # Treat it as one-item batch instead of hard-failing.
+            if {"judge", "criterion_id", "score", "argument", "cited_evidence"}.issubset(parsed.keys()):
+                return [parsed]
     except Exception:
         pass
 
@@ -191,6 +196,8 @@ def _extract_json_array(raw: str) -> list:
                 opinions = parsed_obj.get("opinions")
                 if isinstance(opinions, list):
                     return opinions
+                if {"judge", "criterion_id", "score", "argument", "cited_evidence"}.issubset(parsed_obj.keys()):
+                    return [parsed_obj]
         except Exception:
             pass
 
@@ -204,6 +211,17 @@ def _extract_json_array(raw: str) -> list:
             return parsed
 
     raise ValueError("No valid JSON array found in model output.")
+
+
+def _normalize_criterion_id(raw_id: object) -> str:
+    """
+    Normalize model-provided criterion ids to improve matching robustness.
+    """
+    text = str(raw_id or "").strip().lower()
+    text = text.replace("&", "and")
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text
 
 
 # ------------------------------------------------------------------------------
@@ -288,6 +306,86 @@ def _invoke(prompt: str) -> str:
     return _llm.invoke(prompt).content
 
 
+def _single_criterion_prompt(
+    persona: str,
+    persona_system: str,
+    criterion_id: str,
+    hint: str,
+    evidence_text: str,
+) -> str:
+    return f"""
+{persona_system}
+
+IMPORTANT OUTPUT RULES (MUST FOLLOW):
+- Return ONLY a JSON object.
+- Do NOT include any other text.
+- Do NOT include markdown or code fences.
+- Do NOT include <think> or explanations.
+- If you cannot comply, return {{}}
+
+Return one JSON object with this exact schema:
+{{
+  "judge": "{persona}",
+  "criterion_id": "{criterion_id}",
+  "score": <integer 1-5>,
+  "argument": "<string>",
+  "cited_evidence": ["<location1>", "<location2>"]
+}}
+
+Rules:
+- criterion_id MUST be exactly "{criterion_id}".
+- score MUST be an integer 1-5.
+- cited_evidence MUST be concrete locations.
+- Do not include extra keys.
+
+Criterion hint:
+- {criterion_id}: {hint}
+
+EVIDENCE:
+{evidence_text}
+""".strip()
+
+
+def _try_fill_missing_with_single_calls(
+    persona: str,
+    persona_system: str,
+    missing_ids: List[str],
+    hints: Dict[str, str],
+    evidence_text: str,
+) -> Dict[str, dict]:
+    filled: Dict[str, dict] = {}
+
+    for cid in missing_ids:
+        prompt = _single_criterion_prompt(
+            persona=persona,
+            persona_system=persona_system,
+            criterion_id=cid,
+            hint=hints.get(cid, ""),
+            evidence_text=evidence_text,
+        )
+        try:
+            raw = _invoke(prompt)
+            arr = _extract_json_array(raw)
+        except Exception:
+            continue
+
+        # For single-criterion prompts, accept the first dict-like opinion and force
+        # persona + criterion binding to the target criterion.
+        accepted: Optional[dict] = None
+        for item in arr:
+            if not isinstance(item, dict):
+                continue
+            if all(k in item for k in ("score", "argument", "cited_evidence")):
+                accepted = item
+                break
+        if accepted is not None and cid not in filled:
+            accepted["judge"] = persona
+            accepted["criterion_id"] = cid
+            filled[cid] = accepted
+
+    return filled
+
+
 # ------------------------------------------------------------------------------
 # Batched judge runner
 # ------------------------------------------------------------------------------
@@ -312,15 +410,31 @@ def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> 
         )
 
     # Build a map by criterion_id (more robust than zip)
+    # Match outputs by normalized criterion id so minor formatting differences
+    # (spaces, case, punctuation) don't drop valid model opinions.
+    canonical_by_norm: Dict[str, str] = {_normalize_criterion_id(cid): cid for cid in ids}
     by_id: Dict[str, dict] = {}
     for item in arr:
         if not isinstance(item, dict):
             continue
-        cid = item.get("criterion_id")
-        if cid in ids and cid not in by_id:
+        raw_cid = item.get("criterion_id")
+        cid = canonical_by_norm.get(_normalize_criterion_id(raw_cid), None)
+        if cid and cid not in by_id:
             by_id[cid] = item
 
     opinions: List[JudicialOpinion] = []
+
+    missing_ids = [cid for cid in ids if cid not in by_id]
+    if missing_ids:
+        by_id.update(
+            _try_fill_missing_with_single_calls(
+                persona=persona,
+                persona_system=persona_system,
+                missing_ids=missing_ids,
+                hints=hints,
+                evidence_text=evidence_text,
+            )
+        )
 
     for cid in ids:
         item = by_id.get(cid)
