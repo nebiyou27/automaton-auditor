@@ -14,6 +14,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
+from langchain_core.tools import tool
 from PyPDF2 import PdfReader
 
 
@@ -128,14 +129,58 @@ def extract_git_history(repo_path: str, max_commits: int = 200) -> ToolResult:
 # AST Tools (Deep structural analysis; not regex)
 # -------------------------------------------------------------------------------
 
-def _read_text_file(path: str, max_chars: int = 250_000) -> Tuple[bool, str]:
+def _read_text_file(
+    path: str,
+    max_chars: int = 250_000,
+    start_line: Optional[int] = None,
+    end_line: Optional[int] = None,
+) -> Tuple[bool, str]:
     if not os.path.exists(path):
         return False, f"File not found: {path}"
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            if start_line is not None or end_line is not None:
+                lines = f.readlines()
+                s = max(1, int(start_line) if start_line is not None else 1)
+                e = int(end_line) if end_line is not None else len(lines)
+                if e < s:
+                    return True, ""
+                return True, "".join(lines[s - 1 : e])[:max_chars]
             return True, f.read(max_chars)
     except Exception as e:
         return False, f"Failed to read file {path}: {e!r}"
+
+
+def grep_search(repo_path: str, term: str) -> ToolResult:
+    if not repo_path or not os.path.isdir(repo_path):
+        return ToolResult(ok=False, error=f"Invalid repo_path: {repo_path}")
+    if not isinstance(term, str) or not term:
+        return ToolResult(ok=False, error="term must be a non-empty string.")
+
+    matches: List[Dict[str, object]] = []
+    for root, _, files in os.walk(repo_path):
+        for filename in files:
+            if not filename.endswith(".py"):
+                continue
+            file_path = os.path.join(root, filename)
+            try:
+                with open(file_path, "rb") as raw:
+                    if b"\x00" in raw.read(4096):
+                        continue
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line_number, line in enumerate(f, start=1):
+                        if term in line:
+                            matches.append(
+                                {
+                                    "file": os.path.relpath(file_path, repo_path).replace("\\", "/"),
+                                    "line_number": line_number,
+                                    "line": line.rstrip("\r\n"),
+                                }
+                            )
+            except (UnicodeDecodeError, OSError):
+                continue
+
+    return ToolResult(ok=True, data={"term": term, "count": len(matches), "matches": matches})
 
 
 def analyze_langgraph_graph_py(graph_file_path: str) -> ToolResult:
@@ -378,3 +423,36 @@ def query_pdf_chunks(pdf_index: dict, query: str, top_k: int = 5) -> ToolResult:
             "matches": top,
         },
     )
+
+
+@tool("clone_repo_sandboxed")
+def clone_repo_sandboxed_tool(
+    repo_url: str,
+    timeout_s: int = 90,
+) -> ToolResult:
+    """Clone a Git repository into a temporary sandbox path. Input expects repo_url and optional timeout_s seconds. Returns ToolResult with clone metadata or an error."""
+    return clone_repo_sandboxed(repo_url=repo_url, timeout_s=timeout_s)
+
+
+@tool("extract_git_history")
+def extract_git_history_tool(repo_path: str, max_commits: int = 200) -> ToolResult:
+    """Read git commit history for a cloned repository path. Input expects repo_path and optional max_commits. Returns ToolResult containing commit records or an error."""
+    return extract_git_history(repo_path=repo_path, max_commits=max_commits)
+
+
+@tool("analyze_langgraph_graph_py")
+def analyze_langgraph_graph_py_tool(graph_file_path: str) -> ToolResult:
+    """Analyze a graph Python file with AST to detect LangGraph structure. Input expects graph_file_path to a .py file. Returns ToolResult with structural findings or an error."""
+    return analyze_langgraph_graph_py(graph_file_path=graph_file_path)
+
+
+@tool("grep_search")
+def grep_search_tool(repo_path: str, term: str) -> ToolResult:
+    """Search all Python files under a repo for a text term. Input expects repo_path and term. Returns ToolResult with file, line number, and line matches."""
+    return grep_search(repo_path=repo_path, term=term)
+
+
+@tool("read_file")
+def read_file(path: str, max_chars: int = 250_000, start_line: Optional[int] = None, end_line: Optional[int] = None) -> Tuple[bool, str]:
+    """Read text from a file, optionally by 1-indexed line range. Input expects path, max_chars, and optional start_line/end_line. Returns a success flag and file content or error string."""
+    return _read_text_file(path=path, max_chars=max_chars, start_line=start_line, end_line=end_line)
