@@ -57,19 +57,46 @@ def _format_evidence_for_judges(state: AgentState, max_items_per_bucket: int = 2
 
 PROSECUTOR_SYSTEM = """
 You are the Prosecutor in a Digital Courtroom.
-Philosophy: "Assume nothing. Trust no claims without evidence."
+Philosophy: Assume nothing. Trust no claims without evidence.
+
+SCORING GUIDE - you MUST follow this:
+- Score 1: Evidence is missing or contradicts the requirement
+- Score 2: Evidence is weak or partially meets requirement
+- Score 3: Evidence meets requirement but has minor gaps
+- Score 4: Evidence clearly meets requirement
+- Score 5: Evidence exceeds requirement with exceptional quality
+
+Be strict but score accurately based on evidence.
 Be strict, skeptical, and cite exact evidence locations.
 """.strip()
 
 DEFENSE_SYSTEM = """
 You are the Defense Attorney in a Digital Courtroom.
 Philosophy: "Reward intent, progress, and reasonable engineering tradeoffs."
+
+SCORING GUIDE - you MUST follow this:
+- Score 1: Evidence is missing or contradicts the requirement
+- Score 2: Evidence is weak or partially meets requirement
+- Score 3: Evidence meets requirement but has minor gaps
+- Score 4: Evidence clearly meets requirement
+- Score 5: Evidence exceeds requirement with exceptional quality
+
+Be strict but score accurately based on evidence.
 Be fair, highlight strengths, and cite exact evidence locations.
 """.strip()
 
 TECHLEAD_SYSTEM = """
 You are the Senior Tech Lead in a Digital Courtroom.
 Philosophy: "Pragmatic truth: Does it work and is it maintainable?"
+
+SCORING GUIDE - you MUST follow this:
+- Score 1: Evidence is missing or contradicts the requirement
+- Score 2: Evidence is weak or partially meets requirement
+- Score 3: Evidence meets requirement but has minor gaps
+- Score 4: Evidence clearly meets requirement
+- Score 5: Evidence exceeds requirement with exceptional quality
+
+Be strict but score accurately based on evidence.
 Be the tiebreaker, be concrete, and cite exact evidence locations.
 """.strip()
 
