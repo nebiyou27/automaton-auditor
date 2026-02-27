@@ -81,23 +81,26 @@ def _resolve_rubric_path(state: AgentState) -> str:
     return os.path.join(os.getcwd(), rubric_path)
 
 
-def _load_rubric_ids_and_hints(state: AgentState) -> Tuple[List[str], Dict[str, str], Optional[str]]:
+def _load_rubric_ids_and_hints(
+    state: AgentState,
+) -> Tuple[List[str], Dict[str, str], Dict[str, Dict[str, str]], Optional[str]]:
     path = _resolve_rubric_path(state)
     if not os.path.exists(path):
-        return [], {}, f"Rubric file not found: {path}"
+        return [], {}, {}, f"Rubric file not found: {path}"
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
-        return [], {}, f"Rubric JSON parse error: {e!r}"
+        return [], {}, {}, f"Rubric JSON parse error: {e!r}"
 
     dims = data.get("dimensions")
     if not isinstance(dims, list) or not dims:
-        return [], {}, "Rubric dimensions[] missing or empty."
+        return [], {}, {}, "Rubric dimensions[] missing or empty."
 
     ids: List[str] = []
     hints: Dict[str, str] = {}
+    judicial_logic_by_id: Dict[str, Dict[str, str]] = {}
     for d in dims:
         if not isinstance(d, dict):
             continue
@@ -108,11 +111,24 @@ def _load_rubric_ids_and_hints(state: AgentState) -> Tuple[List[str], Dict[str, 
             name = str(d.get("name", "")).strip()
             instr = str(d.get("forensic_instruction", "")).strip()
             hints[cid] = f"name={name} | forensic_instruction={instr}"
+            jl = d.get("judicial_logic", {})
+            if isinstance(jl, dict):
+                judicial_logic_by_id[cid] = {
+                    "prosecutor": str(jl.get("prosecutor", "")).strip(),
+                    "defense": str(jl.get("defense", "")).strip(),
+                    "tech_lead": str(jl.get("tech_lead", "")).strip(),
+                }
+            else:
+                judicial_logic_by_id[cid] = {
+                    "prosecutor": "",
+                    "defense": "",
+                    "tech_lead": "",
+                }
 
     if not ids:
-        return [], {}, "Rubric dimensions[] contains no valid id fields."
+        return [], {}, {}, "Rubric dimensions[] contains no valid id fields."
 
-    return ids, hints, None
+    return ids, hints, judicial_logic_by_id, None
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -147,14 +163,17 @@ def _single_criterion_prompt(
     persona_system: str,
     criterion_id: str,
     hint: str,
+    judicial_instruction: str,
     evidence_text: str,
 ) -> str:
     return f"""
 {persona_system}
 
-Return a valid opinion for this criterion:
-- criterion_id: {criterion_id}
-- hint: {hint}
+Your specific instruction for this criterion:
+{judicial_instruction}
+
+Criterion: {criterion_id}
+Context: {hint}
 
 Evidence:
 {evidence_text}
@@ -189,14 +208,29 @@ def _invoke_structured(prompt: str, persona: str, criterion_id: str) -> Judicial
 
 
 def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> List[JudicialOpinion]:
-    ids, hints, err = _load_rubric_ids_and_hints(state)
+    ids, hints, judicial_logic_by_id, err = _load_rubric_ids_and_hints(state)
     if err:
         return _fallback_opinions(persona, ["rubric_load_failed"], err, score=3)
 
     evidence_text = _format_evidence_for_judges(state)
+    persona_key = {
+        "Prosecutor": "prosecutor",
+        "Defense": "defense",
+        "TechLead": "tech_lead",
+    }.get(persona, "")
     opinions: List[JudicialOpinion] = []
     for cid in ids:
-        prompt = _single_criterion_prompt(persona, persona_system, cid, hints.get(cid, ""), evidence_text)
+        judicial_instruction = ""
+        if persona_key:
+            judicial_instruction = judicial_logic_by_id.get(cid, {}).get(persona_key, "")
+        prompt = _single_criterion_prompt(
+            persona,
+            persona_system,
+            cid,
+            hints.get(cid, ""),
+            judicial_instruction,
+            evidence_text,
+        )
         opinions.append(_invoke_structured(prompt, persona, cid))
 
     return opinions
