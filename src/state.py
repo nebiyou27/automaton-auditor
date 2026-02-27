@@ -30,7 +30,7 @@ class JudicialOpinion(BaseModel):
     Three opinions (Prosecutor, Defense, TechLead) form a dialectical bench.
     """
     judge: Literal["Prosecutor", "Defense", "TechLead"] = Field(description="Which persona produced this opinion.")
-    criterion_id: str = Field(description="Rubric criterion ID being scored (e.g., 'langgraph_architecture').")
+    criterion_id: str = Field(description="Rubric criterion ID being scored.")
     score: int = Field(ge=1, le=5, description="Score from 1 (worst) to 5 (best).")
     argument: str = Field(description="Judge reasoning tied to evidence and rubric logic.")
     cited_evidence: List[str] = Field(
