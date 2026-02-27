@@ -1,4 +1,5 @@
 import os
+import pathlib
 
 from dotenv import load_dotenv
 
@@ -6,9 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 if not (os.getenv("LANGCHAIN_API_KEY") or "").strip():
-    # Prevent LangSmith 401 retries when running locally without a key.
-    os.environ["LANGCHAIN_TRACING_V2"] = "false"
-    os.environ["LANGSMITH_TRACING"] = "false"
+    print("⚠️  LANGCHAIN_API_KEY not set — LangSmith tracing will be skipped.")
 
 from src.graph import build_graph  # noqa: E402
 
@@ -31,8 +30,11 @@ def main():
 
     print("\n=== FINAL STATE KEYS ===")
     print(result.keys())
-    print("\n=== FINAL REPORT ===")
-    print(result["final_report"])
+    # FIXED: C11b
+    out = pathlib.Path("audit/report_onself_generated/audit_report.md")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(result["final_report"], encoding="utf-8")
+    print(f"Report saved to {out}")
     print("\n=== EVIDENCE BUCKETS ===")
     for k, v in result["evidences"].items():
         print(k, len(v))

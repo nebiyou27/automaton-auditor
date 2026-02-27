@@ -9,11 +9,10 @@ from __future__ import annotations
 import ast
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PyPDF2 import PdfReader
 
@@ -29,56 +28,56 @@ class ToolResult:
 # Git / Repo Tools (Sandboxed)
 # -------------------------------------------------------------------------------
 
-def clone_repo_sandboxed(repo_url: str, timeout_s: int = 90) -> ToolResult:
+def clone_repo_sandboxed(
+    repo_url: str,
+    timeout_s: int = 90,
+    analyzer: Optional[Callable[[str], ToolResult]] = None,
+) -> ToolResult:
     """
     Clone an arbitrary GitHub repo into an isolated temporary directory.
-    Returns: {"repo_path": <path>} on success.
+    If analyzer is provided, run all downstream analysis inside the temp dir context.
     """
     if not repo_url or not isinstance(repo_url, str):
         return ToolResult(ok=False, error="Invalid repo_url (empty or not a string).")
 
-    repo_path: Optional[str] = None
     try:
-        repo_path = tempfile.mkdtemp(prefix="forensic_repo_clone_")
+        # FIXED: C6
+        with tempfile.TemporaryDirectory(prefix="forensic_repo_clone_") as repo_path:
+            # Use subprocess list args (no shell=True) to reduce injection risk.
+            proc = subprocess.run(
+                ["git", "clone", "--depth", "50", repo_url, repo_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                check=False,
+            )
+            if proc.returncode != 0:
+                err = (proc.stderr or "").strip() or (proc.stdout or "").strip() or "Unknown git clone error."
+                err_l = err.lower()
+                if "authentication failed" in err_l or "could not read from remote repository" in err_l:
+                    typed_err = f"git clone auth/permission error: {err}"
+                elif "repository not found" in err_l:
+                    typed_err = f"git clone repository not found: {err}"
+                elif "could not resolve host" in err_l or "failed to connect" in err_l:
+                    typed_err = f"git clone network error: {err}"
+                else:
+                    typed_err = f"git clone failed: {err}"
+                return ToolResult(ok=False, error=typed_err)
 
-        # Use subprocess list args (no shell=True) to reduce injection risk.
-        proc = subprocess.run(
-            ["git", "clone", "--depth", "50", repo_url, repo_path],
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        if proc.returncode != 0:
-            err = (proc.stderr or "").strip() or (proc.stdout or "").strip() or "Unknown git clone error."
-            err_l = err.lower()
-            if "authentication failed" in err_l or "could not read from remote repository" in err_l:
-                typed_err = f"git clone auth/permission error: {err}"
-            elif "repository not found" in err_l:
-                typed_err = f"git clone repository not found: {err}"
-            elif "could not resolve host" in err_l or "failed to connect" in err_l:
-                typed_err = f"git clone network error: {err}"
-            else:
-                typed_err = f"git clone failed: {err}"
-            shutil.rmtree(repo_path, ignore_errors=True)
-            return ToolResult(ok=False, error=typed_err)
+            if analyzer is not None:
+                return analyzer(repo_path)
 
-        return ToolResult(
-            ok=True,
-            data={
-                "repo_path": repo_path,
-                "cleanup_required": True,
-                "clone_depth": 50,
-                "timeout_s": timeout_s,
-            },
-        )
+            return ToolResult(
+                ok=True,
+                data={
+                    "repo_path": repo_path,
+                    "clone_depth": 50,
+                    "timeout_s": timeout_s,
+                },
+            )
     except subprocess.TimeoutExpired:
-        if repo_path:
-            shutil.rmtree(repo_path, ignore_errors=True)
         return ToolResult(ok=False, error=f"git clone timed out after {timeout_s}s.")
     except Exception as e:
-        if repo_path:
-            shutil.rmtree(repo_path, ignore_errors=True)
         return ToolResult(ok=False, error=f"Unexpected error during clone: {e!r}")
 
 

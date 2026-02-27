@@ -1,41 +1,30 @@
 # src/nodes/judges.py
 # ===================
 # Judicial layer: three distinct personas produce structured JudicialOpinion outputs.
-# Phase 4.5 (batched): one LLM call per judge returning one opinion per rubric criterion.
-#
-# Hardened for LOCAL Ollama (DeepSeek-R1):
-# - No "rate limit sleep" logic (local model)
-# - Strips <think>...</think> and other non-JSON wrappers
-# - Enforces JSON-only output via strict prompt
-# - Robust JSON array extraction + schema validation
-# - Neutral fallback score=3 to avoid collapsing total score when LLM fails
 
 from __future__ import annotations
 
 import json
 import os
 import re
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 from langchain_ollama import ChatOllama
 
 from src.state import AgentState, JudicialOpinion
 
 
-_llm = ChatOllama(
-    model=os.getenv("OLLAMA_MODEL", "deepseek-r1:8b"),
-    base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-    format="json",
-    temperature=0.2,
-)
+def _get_structured_llm():
+    llm = ChatOllama(
+        model=os.getenv("OLLAMA_MODEL", "deepseek-r1:8b"),
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        format="json",
+        temperature=0.2,
+    )
+    return llm, llm.with_structured_output(JudicialOpinion)
 
-
-# ------------------------------------------------------------------------------
-# Evidence formatting (safe for Evidence objects OR dicts)
-# ------------------------------------------------------------------------------
 
 def _safe_get(ev, key: str, default=None):
-    """Handle Evidence objects or dicts."""
     if isinstance(ev, dict):
         return ev.get(key, default)
     return getattr(ev, key, default)
@@ -66,10 +55,6 @@ def _format_evidence_for_judges(state: AgentState, max_items_per_bucket: int = 2
     return "\n".join(lines)
 
 
-# ------------------------------------------------------------------------------
-# Personas
-# ------------------------------------------------------------------------------
-
 PROSECUTOR_SYSTEM = """
 You are the Prosecutor in a Digital Courtroom.
 Philosophy: "Assume nothing. Trust no claims without evidence."
@@ -89,10 +74,6 @@ Be the tiebreaker, be concrete, and cite exact evidence locations.
 """.strip()
 
 
-# ------------------------------------------------------------------------------
-# Rubric loading
-# ------------------------------------------------------------------------------
-
 def _resolve_rubric_path(state: AgentState) -> str:
     rubric_path = (state.get("rubric_path") or "rubric/week2_rubric.json").strip()
     if os.path.isabs(rubric_path):
@@ -101,11 +82,6 @@ def _resolve_rubric_path(state: AgentState) -> str:
 
 
 def _load_rubric_ids_and_hints(state: AgentState) -> Tuple[List[str], Dict[str, str], Optional[str]]:
-    """
-    Returns (ids, hints_by_id, error).
-
-    Fail-closed: if rubric invalid, return ([], {}, error_msg).
-    """
     path = _resolve_rubric_path(state)
     if not os.path.exists(path):
         return [], {}, f"Rubric file not found: {path}"
@@ -122,7 +98,6 @@ def _load_rubric_ids_and_hints(state: AgentState) -> Tuple[List[str], Dict[str, 
 
     ids: List[str] = []
     hints: Dict[str, str] = {}
-
     for d in dims:
         if not isinstance(d, dict):
             continue
@@ -140,104 +115,21 @@ def _load_rubric_ids_and_hints(state: AgentState) -> Tuple[List[str], Dict[str, 
     return ids, hints, None
 
 
-# ------------------------------------------------------------------------------
-# Output parsing
-# ------------------------------------------------------------------------------
-
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_think_and_noise(raw: str) -> str:
-    """
-    DeepSeek-R1 often emits <think>...</think> or extra prose.
-    Remove that before JSON extraction.
-    """
     raw = (raw or "").strip()
     raw = _THINK_RE.sub("", raw).strip()
-
-    # Also remove common markdown code fences if present
     raw = raw.replace("```json", "").replace("```", "").strip()
     return raw
 
 
-def _extract_json_array(raw: str) -> list:
-    """
-    Best-effort extraction of model output supporting:
-    - direct JSON array
-    - object wrapper: {"opinions": [...]}
-    - single opinion object: {...}
-    """
-    raw = _strip_think_and_noise(raw)
-
-    # 1) direct parse
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict):
-            opinions = parsed.get("opinions")
-            if isinstance(opinions, list):
-                return opinions
-            # Some Ollama model outputs return a single object despite array instructions.
-            # Treat it as one-item batch instead of hard-failing.
-            if {"judge", "criterion_id", "score", "argument", "cited_evidence"}.issubset(parsed.keys()):
-                return [parsed]
-    except Exception:
-        pass
-
-    # 2) salvage: try object wrapper first
-    start_obj = raw.find("{")
-    end_obj = raw.rfind("}")
-    if start_obj != -1 and end_obj != -1 and end_obj > start_obj:
-        candidate_obj = raw[start_obj : end_obj + 1]
-        try:
-            parsed_obj = json.loads(candidate_obj)
-            if isinstance(parsed_obj, dict):
-                opinions = parsed_obj.get("opinions")
-                if isinstance(opinions, list):
-                    return opinions
-                if {"judge", "criterion_id", "score", "argument", "cited_evidence"}.issubset(parsed_obj.keys()):
-                    return [parsed_obj]
-        except Exception:
-            pass
-
-    # 3) salvage: find first '[' and last ']'
-    start = raw.find("[")
-    end = raw.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        candidate = raw[start : end + 1]
-        parsed = json.loads(candidate)
-        if isinstance(parsed, list):
-            return parsed
-
-    raise ValueError("No valid JSON array found in model output.")
-
-
-def _normalize_criterion_id(raw_id: object) -> str:
-    """
-    Normalize model-provided criterion ids to improve matching robustness.
-    """
-    text = str(raw_id or "").strip().lower()
-    text = text.replace("&", "and")
-    text = re.sub(r"[^a-z0-9]+", "_", text)
-    text = re.sub(r"_+", "_", text).strip("_")
-    return text
-
-
-# ------------------------------------------------------------------------------
-# Fallback behavior (neutral score)
-# ------------------------------------------------------------------------------
-
 def _fallback_opinions(persona: str, criterion_ids: List[str], message: str, score: int = 3) -> List[JudicialOpinion]:
-    """
-    Always return valid opinions so the graph never crashes.
-    Use neutral score=3 by default to avoid collapsing system score due to infra issues.
-    """
     if not criterion_ids:
         criterion_ids = ["rubric_load_failed"]
 
     safe_score = max(1, min(5, int(score)))
-
     return [
         JudicialOpinion(
             judge=persona,  # type: ignore[arg-type]
@@ -250,62 +142,6 @@ def _fallback_opinions(persona: str, criterion_ids: List[str], message: str, sco
     ]
 
 
-# ------------------------------------------------------------------------------
-# Prompting
-# ------------------------------------------------------------------------------
-
-def _batched_prompt(
-    persona: str,
-    persona_system: str,
-    ids: List[str],
-    hints: Dict[str, str],
-    evidence_text: str,
-) -> str:
-    rubric_lines = "\n".join([f"- {cid}: {hints.get(cid,'')}" for cid in ids])
-
-    return f"""
-{persona_system}
-
-IMPORTANT OUTPUT RULES (MUST FOLLOW):
-- Return ONLY a JSON array.
-- Do NOT include any other text.
-- Do NOT include markdown or code fences.
-- Do NOT include <think> or explanations.
-- If you cannot comply, return [].
-
-You must return a JSON array of objects.
-Each object MUST match this schema exactly:
-
-{{
-  "judge": "{persona}",
-  "criterion_id": "<one of the provided rubric ids>",
-  "score": <integer 1-5>,
-  "argument": "<string>",
-  "cited_evidence": ["<location1>", "<location2>"]
-}}
-
-Rules:
-- Return EXACTLY ONE object per rubric criterion id.
-- criterion_id MUST be one of the provided ids.
-- score MUST be an integer 1-5.
-- cited_evidence MUST be concrete locations (file paths, chunk_ids/pages, evidence locations).
-- Do not include extra keys.
-
-Rubric criterion ids + hints:
-{rubric_lines}
-
-EVIDENCE:
-{evidence_text}
-""".strip()
-
-
-def _invoke(prompt: str) -> str:
-    """
-    Local Ollama call. No rate-limit retry.
-    """
-    return _llm.invoke(prompt).content
-
-
 def _single_criterion_prompt(
     persona: str,
     persona_system: str,
@@ -316,79 +152,41 @@ def _single_criterion_prompt(
     return f"""
 {persona_system}
 
-IMPORTANT OUTPUT RULES (MUST FOLLOW):
-- Return ONLY a JSON object.
-- Do NOT include any other text.
-- Do NOT include markdown or code fences.
-- Do NOT include <think> or explanations.
-- If you cannot comply, return {{}}
+Return a valid opinion for this criterion:
+- criterion_id: {criterion_id}
+- hint: {hint}
 
-Return one JSON object with this exact schema:
-{{
-  "judge": "{persona}",
-  "criterion_id": "{criterion_id}",
-  "score": <integer 1-5>,
-  "argument": "<string>",
-  "cited_evidence": ["<location1>", "<location2>"]
-}}
-
-Rules:
-- criterion_id MUST be exactly "{criterion_id}".
-- score MUST be an integer 1-5.
-- cited_evidence MUST be concrete locations.
-- Do not include extra keys.
-
-Criterion hint:
-- {criterion_id}: {hint}
-
-EVIDENCE:
+Evidence:
 {evidence_text}
 """.strip()
 
 
-def _try_fill_missing_with_single_calls(
-    persona: str,
-    persona_system: str,
-    missing_ids: List[str],
-    hints: Dict[str, str],
-    evidence_text: str,
-) -> Dict[str, dict]:
-    filled: Dict[str, dict] = {}
-
-    for cid in missing_ids:
-        prompt = _single_criterion_prompt(
-            persona=persona,
-            persona_system=persona_system,
-            criterion_id=cid,
-            hint=hints.get(cid, ""),
-            evidence_text=evidence_text,
-        )
+def _invoke_structured(prompt: str, persona: str, criterion_id: str) -> JudicialOpinion:
+    _llm, _structured_llm = _get_structured_llm()
+    try:
+        op = _structured_llm.invoke(prompt)
+        if isinstance(op, JudicialOpinion):
+            op.judge = persona  # type: ignore[assignment]
+            op.criterion_id = criterion_id
+            return op
+        if isinstance(op, dict):
+            op["judge"] = persona
+            op["criterion_id"] = criterion_id
+            return JudicialOpinion(**op)
+    except Exception:
         try:
-            raw = _invoke(prompt)
-            arr = _extract_json_array(raw)
+            _strip_think_and_noise(str(_llm.invoke(prompt).content))
         except Exception:
-            continue
+            pass
 
-        # For single-criterion prompts, accept the first dict-like opinion and force
-        # persona + criterion binding to the target criterion.
-        accepted: Optional[dict] = None
-        for item in arr:
-            if not isinstance(item, dict):
-                continue
-            if all(k in item for k in ("score", "argument", "cited_evidence")):
-                accepted = item
-                break
-        if accepted is not None and cid not in filled:
-            accepted["judge"] = persona
-            accepted["criterion_id"] = cid
-            filled[cid] = accepted
+    return JudicialOpinion(
+        judge=persona,  # type: ignore[arg-type]
+        criterion_id=criterion_id,
+        score=3,
+        argument="Invalid model JSON schema; neutral fallback generated.",
+        cited_evidence=[],
+    )
 
-    return filled
-
-
-# ------------------------------------------------------------------------------
-# Batched judge runner
-# ------------------------------------------------------------------------------
 
 def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> List[JudicialOpinion]:
     ids, hints, err = _load_rubric_ids_and_hints(state)
@@ -396,84 +194,13 @@ def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> 
         return _fallback_opinions(persona, ["rubric_load_failed"], err, score=3)
 
     evidence_text = _format_evidence_for_judges(state)
-    prompt = _batched_prompt(persona, persona_system, ids, hints, evidence_text)
-
-    try:
-        raw = _invoke(prompt)
-        arr = _extract_json_array(raw)
-    except Exception as e:
-        return _fallback_opinions(
-            persona,
-            ids,
-            f"Judge model call failed. Neutral fallback opinions generated. ({e})",
-            score=3,
-        )
-
-    # Build a map by criterion_id (more robust than zip)
-    # Match outputs by normalized criterion id so minor formatting differences
-    # (spaces, case, punctuation) don't drop valid model opinions.
-    canonical_by_norm: Dict[str, str] = {_normalize_criterion_id(cid): cid for cid in ids}
-    by_id: Dict[str, dict] = {}
-    for item in arr:
-        if not isinstance(item, dict):
-            continue
-        raw_cid = item.get("criterion_id")
-        cid = canonical_by_norm.get(_normalize_criterion_id(raw_cid), None)
-        if cid and cid not in by_id:
-            by_id[cid] = item
-
     opinions: List[JudicialOpinion] = []
-
-    missing_ids = [cid for cid in ids if cid not in by_id]
-    if missing_ids:
-        by_id.update(
-            _try_fill_missing_with_single_calls(
-                persona=persona,
-                persona_system=persona_system,
-                missing_ids=missing_ids,
-                hints=hints,
-                evidence_text=evidence_text,
-            )
-        )
-
     for cid in ids:
-        item = by_id.get(cid)
-
-        if not isinstance(item, dict):
-            opinions.append(
-                JudicialOpinion(
-                    judge=persona,  # type: ignore[arg-type]
-                    criterion_id=cid,
-                    score=3,
-                    argument="Missing/invalid opinion for criterion from model output; neutral fallback generated.",
-                    cited_evidence=[],
-                )
-            )
-            continue
-
-        # Force correct judge + criterion_id
-        item["judge"] = persona
-        item["criterion_id"] = cid
-
-        try:
-            op = JudicialOpinion(**item)
-        except Exception:
-            op = JudicialOpinion(
-                judge=persona,  # type: ignore[arg-type]
-                criterion_id=cid,
-                score=3,
-                argument="Invalid model JSON schema; neutral fallback generated.",
-                cited_evidence=[],
-            )
-
-        opinions.append(op)
+        prompt = _single_criterion_prompt(persona, persona_system, cid, hints.get(cid, ""), evidence_text)
+        opinions.append(_invoke_structured(prompt, persona, cid))
 
     return opinions
 
-
-# ------------------------------------------------------------------------------
-# Node entrypoints
-# ------------------------------------------------------------------------------
 
 def prosecutor_judge(state: AgentState) -> Dict[str, List[JudicialOpinion]]:
     return {"opinions": _run_batched_judge("Prosecutor", PROSECUTOR_SYSTEM, state)}

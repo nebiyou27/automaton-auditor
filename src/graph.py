@@ -11,7 +11,7 @@ from typing import Literal
 from langgraph.graph import END, START, StateGraph
 
 from src.state import AgentState
-from src.nodes.detectives import doc_analyst, repo_investigator
+from src.nodes.detectives import doc_analyst, repo_investigator, vision_inspector_node
 from src.nodes.aggregator import evidence_aggregator
 from src.nodes.skip import skip_doc_analyst
 from src.nodes.judges import prosecutor_judge, defense_judge, techlead_judge
@@ -43,6 +43,8 @@ def build_graph():
     builder.add_node("repo_investigator", repo_investigator)
     builder.add_node("doc_analyst", doc_analyst)
     builder.add_node("skip_doc_analyst", skip_doc_analyst)
+    # FIXED: C3+O1
+    builder.add_node("vision_inspector", vision_inspector_node)
 
     # Fan-in evidence sync
     builder.add_node("evidence_aggregator", evidence_aggregator)
@@ -57,6 +59,7 @@ def build_graph():
 
     # ── Detective fan-out ─────────────────────────────────────────────────────
     builder.add_edge(START, "repo_investigator")
+    builder.add_edge(START, "vision_inspector")
 
     builder.add_conditional_edges(
         START,
@@ -71,6 +74,7 @@ def build_graph():
     builder.add_edge("repo_investigator", "evidence_aggregator")
     builder.add_edge("doc_analyst", "evidence_aggregator")
     builder.add_edge("skip_doc_analyst", "evidence_aggregator")
+    builder.add_edge("vision_inspector", "evidence_aggregator")
 
     # ── Judicial fan-out ──────────────────────────────────────────────────────
     builder.add_edge("evidence_aggregator", "prosecutor")
