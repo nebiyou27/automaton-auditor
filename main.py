@@ -37,9 +37,10 @@ def main():
 
     print("\n=== FINAL STATE KEYS ===")
     print(result.keys())
-    # FIXED: C11b
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    out = pathlib.Path(f"audit/report_onpeer_generated/audit_report_{timestamp}.md")
+    is_self = "nebiyou27" in repo_url
+    folder = "report_onself_generated" if is_self else "report_onpeer_generated"
+    out = pathlib.Path(f"audit/{folder}/audit_report_{timestamp}.md")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(result["final_report"], encoding="utf-8")
     print(f"Report saved to {out}")
