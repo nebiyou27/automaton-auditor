@@ -82,6 +82,7 @@ def main():
             "iteration": 0,
             "max_iters": 3,
             "tool_budget": 9,
+            "judge_schema_failures": [],
             "final_report": "",
         }
     )

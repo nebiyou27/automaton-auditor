@@ -19,11 +19,12 @@ from src.nodes.detectives import (
 )
 from src.nodes.aggregator import evidence_aggregator
 from src.nodes.error_handler import error_handler_node
+from src.nodes.judge_repair import judge_repair_node
 from src.nodes.planner import planner_node
 from src.nodes.executor import executor_node
 from src.nodes.reflector import judge_gate_node, reflector_node
 from src.nodes.skip import skip_doc_analyst
-from src.nodes.judges import prosecutor_judge, defense_judge, techlead_judge
+from src.nodes.judges import defense_judge, judge_barrier_node, prosecutor_judge, techlead_judge
 from src.nodes.justice import chief_justice
 
 
@@ -59,6 +60,11 @@ def _route_executor(state: AgentState) -> Literal["reflector", "error_handler"]:
     return "reflector"
 
 
+def _route_judge_barrier(state: AgentState) -> Literal["chief_justice", "judge_repair"]:
+    failures = state.get("judge_schema_failures", []) or []
+    return "judge_repair" if len(failures) > 0 else "chief_justice"
+
+
 def build_graph():
     """
     Digital Courtroom graph:
@@ -86,6 +92,8 @@ def build_graph():
     builder.add_node("executor", executor_node)
     builder.add_node("reflector", reflector_node)
     builder.add_node("judge_gate", judge_gate_node)
+    builder.add_node("judge_barrier", judge_barrier_node)
+    builder.add_node("judge_repair", judge_repair_node)
     builder.add_node("error_handler", error_handler_node)
 
     # Judicial bench
@@ -142,13 +150,22 @@ def build_graph():
         },
     )
     builder.add_edge("judge_gate", "prosecutor")
+    builder.add_edge("prosecutor", "judge_barrier")
     builder.add_edge("judge_gate", "defense")
+    builder.add_edge("defense", "judge_barrier")
     builder.add_edge("judge_gate", "techlead")
+    builder.add_edge("techlead", "judge_barrier")
+    builder.add_conditional_edges(
+        "judge_barrier",
+        _route_judge_barrier,
+        {
+            "chief_justice": "chief_justice",
+            "judge_repair": "judge_repair",
+        },
+    )
+    builder.add_edge("judge_repair", "chief_justice")
 
     # ── Judicial fan-in to Chief Justice ──────────────────────────────────────
-    builder.add_edge("prosecutor", "chief_justice")
-    builder.add_edge("defense", "chief_justice")
-    builder.add_edge("techlead", "chief_justice")
 
     # ── End ───────────────────────────────────────────────────────────────────
     builder.add_edge("error_handler", END)
@@ -174,6 +191,7 @@ if __name__ == "__main__":
         "iteration": 0,
         "max_iters": 3,
         "tool_budget": 9,
+        "judge_schema_failures": [],
         "final_report": "",
     }
 

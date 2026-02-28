@@ -136,5 +136,9 @@ class AgentState(TypedDict):
     error_type: NotRequired[str]
     error_message: NotRequired[str]
     failed_node: NotRequired[str]
+    judge_schema_failures: Annotated[
+        List[str],
+        operator.add
+    ]
 
     final_report: str

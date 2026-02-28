@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import os
 import re
-from json import JSONDecodeError
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_ollama import ChatOllama
@@ -67,6 +66,48 @@ def _safe_get(ev, key: str, default=None):
     if isinstance(ev, dict):
         return ev.get(key, default)
     return getattr(ev, key, default)
+
+
+def _extract_evidence_locations(state: AgentState, criterion_id: str, max_refs: int = 10) -> List[str]:
+    evidences = state.get("evidences", {}) or {}
+    keywords = [k for k in re.split(r"[_\W]+", criterion_id.lower()) if k]
+    refs: List[str] = []
+    for _, items in evidences.items():
+        if not isinstance(items, list):
+            continue
+        for ev in items:
+            location = str(_safe_get(ev, "location", "")).strip()
+            if not location:
+                continue
+            hay = " ".join(
+                [
+                    str(_safe_get(ev, "dimension_id", "")),
+                    str(_safe_get(ev, "goal", "")),
+                    str(_safe_get(ev, "rationale", "")),
+                    str(_safe_get(ev, "content", "")),
+                    location,
+                ]
+            ).lower()
+            if keywords and not any(k in hay for k in keywords):
+                continue
+            if location not in refs:
+                refs.append(location)
+            if len(refs) >= max_refs:
+                return refs
+
+    if refs:
+        return refs
+    # Fallback: allow any known locations if criterion-specific match is empty.
+    for _, items in evidences.items():
+        if not isinstance(items, list):
+            continue
+        for ev in items:
+            location = str(_safe_get(ev, "location", "")).strip()
+            if location and location not in refs:
+                refs.append(location)
+            if len(refs) >= max_refs:
+                return refs
+    return refs
 
 
 def _format_evidence_for_judges(
@@ -345,7 +386,9 @@ def _single_criterion_prompt(
     hint: str,
     judicial_instruction: str,
     evidence_text: str,
+    allowed_refs: List[str],
 ) -> str:
+    refs_text = ", ".join(allowed_refs[:8]) if allowed_refs else "(none available)"
     return f"""
 {persona_system}
 
@@ -362,6 +405,7 @@ Rules:
 - Use only the criterion and evidence shown below.
 - Keep score aligned with argument sentiment and scoring guide.
 - If evidence is missing, set lower score and explain that clearly.
+- `cited_evidence` MUST contain concrete evidence locations from this allowlist: {refs_text}
 
 Your specific instruction for this criterion:
 {judicial_instruction}
@@ -374,36 +418,72 @@ Evidence:
 """.strip()
 
 
-def _invoke_structured(prompt: str, persona: str, criterion_id: str) -> JudicialOpinion:
-    _llm = _get_llm()
+def _coerce_structured_output(payload: object, persona: str, criterion_id: str) -> Optional[JudicialOpinion]:
+    if isinstance(payload, JudicialOpinion):
+        payload.judge = persona  # type: ignore[assignment]
+        payload.criterion_id = criterion_id
+        return payload
+    if isinstance(payload, dict):
+        data = dict(payload)
+        data["judge"] = _normalize_judge(data.get("judge"), persona)
+        data["criterion_id"] = criterion_id
+        data["score"] = _coerce_score(data.get("score"))
+        data["argument"] = str(data.get("argument", "")).strip()
+        data["cited_evidence"] = _coerce_cited_evidence(data.get("cited_evidence"))
+        if not data["argument"]:
+            return None
+        return JudicialOpinion(**data)
+    return None
 
-    try:
-        raw = _llm.invoke(prompt)
-        raw_text = str(getattr(raw, "content", raw))
-        op = _coerce_opinion_from_raw_text(raw_text, persona, criterion_id)
-        if op:
+
+def _normalize_citations(citations: List[str], allowed_refs: List[str]) -> List[str]:
+    if not allowed_refs:
+        return citations[:4]
+    normalized: List[str] = []
+    for c in citations:
+        cand = c.strip()
+        if not cand:
+            continue
+        # Accept exact match or containment overlap with known references.
+        match = next((r for r in allowed_refs if cand == r or cand in r or r in cand), None)
+        if match and match not in normalized:
+            normalized.append(match)
+    if not normalized:
+        normalized = allowed_refs[:2]
+    return normalized[:4]
+
+
+def _invoke_structured(
+    prompt: str,
+    persona: str,
+    criterion_id: str,
+    allowed_refs: List[str],
+    retries: int = 2,
+) -> Tuple[Optional[JudicialOpinion], Optional[str]]:
+    _llm = _get_llm().with_structured_output(JudicialOpinion)
+    last_error: Optional[str] = None
+
+    for attempt in range(retries + 1):
+        try:
+            op_raw = _llm.invoke(prompt)
+            op = _coerce_structured_output(op_raw, persona, criterion_id)
+            if op is None:
+                raise ValueError("Schema validation failed: empty/invalid structured payload.")
+            op.cited_evidence = _normalize_citations(op.cited_evidence, allowed_refs)
             if _is_score_argument_inconsistent(op.score, op.argument):
-                retry_prompt = (
+                raise ValueError("Schema validation failed: score/argument inconsistency.")
+            return op, None
+        except Exception as e:
+            last_error = str(e)
+            if attempt < retries:
+                prompt = (
                     f"{prompt}\n\n"
-                    "Validation step: Your previous score and argument sentiment were inconsistent. "
-                    "Return corrected JSON where score strictly matches the argument and scoring guide."
+                    "Validation retry: your previous output failed schema or consistency checks. "
+                    "Return valid JudicialOpinion JSON matching all constraints."
                 )
-                retried_raw = _llm.invoke(retry_prompt)
-                retried_text = str(getattr(retried_raw, "content", retried_raw))
-                retried = _coerce_opinion_from_raw_text(retried_text, persona, criterion_id)
-                if retried:
-                    return retried
-            return op
-    except Exception:
-        pass
-
-    return JudicialOpinion(
-        judge=persona,  # type: ignore[arg-type]
-        criterion_id=criterion_id,
-        score=3,
-        argument="Model output could not be parsed into required JSON; neutral fallback generated.",
-        cited_evidence=[],
-    )
+                continue
+            break
+    return None, last_error or "Unknown schema validation failure."
 
 
 def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> List[JudicialOpinion]:
@@ -422,6 +502,7 @@ def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> 
         if persona_key:
             judicial_instruction = judicial_logic_by_id.get(cid, {}).get(persona_key, "")
         evidence_text = _format_evidence_for_judges(state, criterion_id=cid)
+        allowed_refs = _extract_evidence_locations(state, cid)
         prompt = _single_criterion_prompt(
             persona,
             persona_system,
@@ -429,19 +510,72 @@ def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> 
             hints.get(cid, ""),
             judicial_instruction,
             evidence_text,
+            allowed_refs,
         )
-        opinions.append(_invoke_structured(prompt, persona, cid))
+        op, _ = _invoke_structured(prompt, persona, cid, allowed_refs=allowed_refs, retries=2)
+        if op is not None:
+            opinions.append(op)
 
     return opinions
 
 
-def prosecutor_judge(state: AgentState) -> Dict[str, List[JudicialOpinion]]:
-    return {"opinions": _run_batched_judge("Prosecutor", PROSECUTOR_SYSTEM, state)}
+def _run_batched_judge_with_errors(
+    persona: str,
+    persona_system: str,
+    state: AgentState,
+) -> Tuple[List[JudicialOpinion], List[str]]:
+    ids, hints, judicial_logic_by_id, err = _load_rubric_ids_and_hints(state)
+    if err:
+        return [], [f"{persona}|rubric_load|{err}"]
+
+    persona_key = {
+        "Prosecutor": "prosecutor",
+        "Defense": "defense",
+        "TechLead": "tech_lead",
+    }.get(persona, "")
+
+    opinions: List[JudicialOpinion] = []
+    errors: List[str] = []
+    for cid in ids:
+        judicial_instruction = ""
+        if persona_key:
+            judicial_instruction = judicial_logic_by_id.get(cid, {}).get(persona_key, "")
+        evidence_text = _format_evidence_for_judges(state, criterion_id=cid)
+        allowed_refs = _extract_evidence_locations(state, cid)
+        prompt = _single_criterion_prompt(
+            persona,
+            persona_system,
+            cid,
+            hints.get(cid, ""),
+            judicial_instruction,
+            evidence_text,
+            allowed_refs,
+        )
+        op, op_err = _invoke_structured(prompt, persona, cid, allowed_refs=allowed_refs, retries=2)
+        if op is not None:
+            opinions.append(op)
+        else:
+            errors.append(f"{persona}|{cid}|{op_err or 'schema_validation_failed'}")
+    return opinions, errors
 
 
-def defense_judge(state: AgentState) -> Dict[str, List[JudicialOpinion]]:
-    return {"opinions": _run_batched_judge("Defense", DEFENSE_SYSTEM, state)}
+def prosecutor_judge(state: AgentState) -> Dict[str, object]:
+    opinions, errors = _run_batched_judge_with_errors("Prosecutor", PROSECUTOR_SYSTEM, state)
+    return {"opinions": opinions, "judge_schema_failures": errors}
 
 
-def techlead_judge(state: AgentState) -> Dict[str, List[JudicialOpinion]]:
-    return {"opinions": _run_batched_judge("TechLead", TECHLEAD_SYSTEM, state)}
+def defense_judge(state: AgentState) -> Dict[str, object]:
+    opinions, errors = _run_batched_judge_with_errors("Defense", DEFENSE_SYSTEM, state)
+    return {"opinions": opinions, "judge_schema_failures": errors}
+
+
+def techlead_judge(state: AgentState) -> Dict[str, object]:
+    opinions, errors = _run_batched_judge_with_errors("TechLead", TECHLEAD_SYSTEM, state)
+    return {"opinions": opinions, "judge_schema_failures": errors}
+
+
+def judge_barrier_node(state: AgentState) -> Dict[str, object]:
+    """
+    Fan-in barrier for judge outputs before routing to Chief Justice or JudgeRepair.
+    """
+    return {}
