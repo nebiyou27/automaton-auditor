@@ -54,6 +54,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable vision mode flag (parsed for compatibility).",
     )
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=6,
+        help="Maximum planner/executor/reflector loop iterations.",
+    )
+    parser.add_argument(
+        "--tool-budget",
+        type=int,
+        default=20,
+        help="Maximum number of tool calls that may be executed.",
+    )
     args = parser.parse_args()
 
     if not (args.repo or "").strip():
@@ -65,6 +77,10 @@ def parse_args() -> argparse.Namespace:
             parser.error("--pdf must end with .pdf.")
         if not os.path.isfile(args.pdf):
             parser.error(f"--pdf file not found: {args.pdf}")
+    if args.max_iters < 0:
+        parser.error("--max-iters must be >= 0.")
+    if args.tool_budget < 0:
+        parser.error("--tool-budget must be >= 0.")
 
     return args
 
@@ -82,6 +98,8 @@ def main():
     print(f"- mode: {args.mode}")
     print(f"- out: {args.out or '(auto)'}")
     print(f"- enable_vision: {args.enable_vision}")
+    print(f"- max-iters: {args.max_iters}")
+    print(f"- tool-budget: {args.tool_budget}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     canonical_folder = MODE_TO_FOLDER[args.mode]
@@ -98,8 +116,8 @@ def main():
             "opinions": [],
             "tool_runs": [],
             "iteration": 0,
-            "max_iters": 3,
-            "tool_budget": 9,
+            "max_iters": args.max_iters,
+            "tool_budget": args.tool_budget,
             "judge_schema_failures": [],
             "final_report": "",
             "audit_mode": args.mode,

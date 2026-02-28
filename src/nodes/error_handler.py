@@ -26,8 +26,8 @@ def error_handler_node(state: AgentState) -> Dict[str, object]:
     failed_node = (state.get("failed_node") or "unknown").strip()
     tools_used = len(state.get("tool_runs", []) or [])
     iteration = int(state.get("iteration", 0) or 0)
-    max_iters = int(state.get("max_iters", 3) or 3)
-    tool_budget = int(state.get("tool_budget", 9) or 9)
+    max_iters = int(state.get("max_iters", 6) or 6)
+    tool_budget = int(state.get("tool_budget", 20) or 20)
 
     report = f"""# AUTOMATON AUDITOR - PARTIAL REPORT (ERROR HANDLER)
 

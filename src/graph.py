@@ -49,10 +49,15 @@ def _route_reflector(state: AgentState) -> Literal["planner", "judge_gate", "err
     return "judge_gate" if stop else "planner"
 
 
-def _route_planner(state: AgentState) -> Literal["executor", "error_handler"]:
+def _route_planner(state: AgentState) -> Literal["executor", "judge_gate", "error_handler"]:
     error_type = (state.get("error_type") or "").strip()
     if error_type == "missing_rubric":
         return "error_handler"
+    stop_decision = state.get("stop_decision")
+    if stop_decision is not None:
+        stop = bool(stop_decision.get("stop", False) if isinstance(stop_decision, dict) else getattr(stop_decision, "stop", False))
+        if stop:
+            return "judge_gate"
     return "executor"
 
 
@@ -133,6 +138,7 @@ def build_graph():
         _route_planner,
         {
             "executor": "executor",
+            "judge_gate": "judge_gate",
             "error_handler": "error_handler",
         },
     )
@@ -193,8 +199,8 @@ if __name__ == "__main__":
         "opinions": [],
         "tool_runs": [],
         "iteration": 0,
-        "max_iters": 3,
-        "tool_budget": 9,
+        "max_iters": 6,
+        "tool_budget": 20,
         "judge_schema_failures": [],
         "final_report": "",
     }

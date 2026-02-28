@@ -178,10 +178,10 @@ def reflector_node(state: AgentState) -> Dict[str, object]:
     all_confident = bool(applicable) and all(r.confidence >= 0.85 for r in applicable)
 
     current_iter = int(state.get("iteration", 0) or 0)
-    max_iters = int(state.get("max_iters", 3) or 3)
+    max_iters = int(state.get("max_iters", 6) or 6)
     next_iter = current_iter + 1
 
-    tool_budget = int(state.get("tool_budget", 9) or 9)
+    tool_budget = int(state.get("tool_budget", 20) or 20)
     tools_used = len(state.get("tool_runs", []) or [])
     budget_exhausted = tools_used >= tool_budget
     max_iters_reached = next_iter >= max_iters

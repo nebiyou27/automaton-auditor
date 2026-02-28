@@ -139,6 +139,40 @@ def _validation_evidence(dimension_id: str, found: bool, rationale: str, content
 
 
 def planner_node(state: AgentState) -> Dict[str, object]:
+    iteration_count = int(state.get("iteration", 0) or 0)
+    max_iters = int(state.get("max_iters", 6) or 6)
+    tool_calls_executed = len(state.get("tool_runs", []) or [])
+    tool_budget = int(state.get("tool_budget", 20) or 20)
+
+    if iteration_count >= max_iters:
+        return {
+            "planned_tool_calls": [],
+            "stop_decision": {
+                "stop": True,
+                "reason": f"Stop: max iterations reached ({iteration_count}/{max_iters}).",
+                "remaining_risks": [],
+            },
+            "error_type": "",
+            "error_message": "",
+            "failed_node": "",
+        }
+
+    if tool_calls_executed >= tool_budget:
+        return {
+            "planned_tool_calls": [],
+            "stop_decision": {
+                "stop": True,
+                "reason": (
+                    "Stop: tool budget exhausted "
+                    f"({tool_calls_executed}/{tool_budget})."
+                ),
+                "remaining_risks": [],
+            },
+            "error_type": "",
+            "error_message": "",
+            "failed_node": "",
+        }
+
     rubric, rubric_err = _load_rubric(state)
     if rubric_err:
         return {
