@@ -11,7 +11,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
@@ -778,6 +778,138 @@ def repo_investigator(state: AgentState) -> Dict[str, object]:
     return clone_res.data
 
 
+def _chunk_location(ch: Dict[str, object]) -> str:
+    return f"page {ch.get('page', '?')} / chunk {ch.get('chunk_id', '?')}"
+
+
+def _windowed_chunk_context(chunks: List[Dict[str, object]], index: int) -> str:
+    start = max(0, index - 1)
+    end = min(len(chunks), index + 2)
+    parts: List[str] = []
+    for i in range(start, end):
+        parts.append(str(chunks[i].get("text", "") or ""))
+    return "\n".join(parts).strip()
+
+
+def _is_substantive_explanation(text: str, term: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered or term.lower() not in lowered:
+        return False
+    if len(lowered) < 140:
+        return False
+    cues = [
+        "because",
+        "therefore",
+        "implemented",
+        "implementation",
+        "via",
+        "using",
+        "through",
+        "ensures",
+        "so that",
+        "architecture",
+        "stategraph",
+        "parallel",
+        "fan-in",
+        "fan out",
+        "synchronization",
+        "judge",
+    ]
+    cue_hits = sum(1 for cue in cues if cue in lowered)
+    sentence_like = lowered.count(".") + lowered.count(":") + lowered.count(";")
+    return cue_hits >= 2 and sentence_like >= 2
+
+
+def _term_regex(term: str) -> re.Pattern[str]:
+    escaped = re.escape(term.lower())
+    escaped = escaped.replace(r"\-", "[- ]")
+    return re.compile(rf"\b{escaped}\b", flags=re.IGNORECASE)
+
+
+def _find_term_occurrences(pdf_index: Dict[str, object], term: str) -> List[Dict[str, object]]:
+    chunks = pdf_index.get("chunks", [])
+    if not isinstance(chunks, list):
+        return []
+    pattern = _term_regex(term)
+    hits: List[Dict[str, object]] = []
+    for idx, ch in enumerate(chunks):
+        text = str(ch.get("text", "") or "")
+        if not text:
+            continue
+        if pattern.search(text.lower()) is None:
+            continue
+        hits.append(
+            {
+                "chunk": ch,
+                "context_window": _windowed_chunk_context(chunks, idx),
+                "location": _chunk_location(ch),
+            }
+        )
+    return hits
+
+
+def _extract_pdf_claimed_paths(pdf_index: Dict[str, object]) -> Dict[str, List[str]]:
+    chunks = pdf_index.get("chunks", [])
+    if not isinstance(chunks, list):
+        return {}
+
+    path_pattern = re.compile(
+        r"\b(?:src|tests|rubric|audit)(?:[\\/][A-Za-z0-9._-]+)+\b|"
+        r"\b(?:README\.md|main\.py|pyproject\.toml|requirements(?:\.txt|\.lock)|\.env(?:\.example)?)\b",
+        flags=re.IGNORECASE,
+    )
+    claims: Dict[str, List[str]] = {}
+    for ch in chunks:
+        text = str(ch.get("text", "") or "")
+        if not text:
+            continue
+        location = _chunk_location(ch)
+        for raw in path_pattern.findall(text):
+            path = str(raw or "").strip().strip("`'\".,;:()[]{}")
+            path = path.replace("\\", "/")
+            if not path:
+                continue
+            claims.setdefault(path, [])
+            if location not in claims[path]:
+                claims[path].append(location)
+    return claims
+
+
+def _build_repo_file_index(repo_path: str) -> set[str]:
+    index: set[str] = set()
+    if not repo_path or not os.path.isdir(repo_path):
+        return index
+    root = Path(repo_path)
+    for p in root.rglob("*"):
+        if p.is_file():
+            try:
+                rel = p.relative_to(root).as_posix()
+                index.add(rel.lower())
+            except Exception:
+                continue
+    return index
+
+
+def _extract_json_object(raw: object) -> Dict[str, object]:
+    text = str(raw or "").strip()
+    if not text:
+        return {}
+    text = text.replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return {}
+        try:
+            parsed = json.loads(text[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+
 def doc_analyst(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]:
     pdf_path = state.get("pdf_path", "")
     evidences: List[Evidence] = []
@@ -829,52 +961,143 @@ def doc_analyst(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]:
         )
     )
 
-    key_concepts = [
+    required_terms = [
         "Dialectical Synthesis",
         "Metacognition",
         "Fan-In",
         "Fan-Out",
         "State Synchronization",
-        "LangGraph",
     ]
 
-    for concept in key_concepts:
-        qres = query_pdf_chunks(pdf_index, concept, top_k=3)
-        if not qres.ok:
-            evidences.append(
-                _evidence(
-                    goal=f"Query PDF for concept occurrence: {concept}",
-                    found=False,
-                    location=pdf_path,
-                    rationale=qres.error or "Query failed.",
-                )
-            )
-            continue
-
-        matches = qres.data.get("matches", [])
-        found = len(matches) > 0
-
-        snippet = None
-        if found:
-            cites = []
-            for m in matches:
-                cites.append(f"{m.get('chunk_id')} (page {m.get('page')})")
-            snippet = " | ".join(cites) + "\n\n" + (matches[0].get("text_preview") or "")
-
+    keyword_dropping_terms: List[str] = []
+    for term in required_terms:
+        occurrences = _find_term_occurrences(pdf_index, term)
+        found = len(occurrences) > 0
+        locations = [str(h.get("location", "")) for h in occurrences[:5]]
+        location_text = ", ".join(locations) if locations else pdf_path
         evidences.append(
             _evidence(
-                goal=f"Check whether concept appears in report: {concept}",
+                goal=f"theoretical_depth: locate required term '{term}'",
                 found=found,
-                location=pdf_path,
-                rationale="Lexical query over chunked PDF index; returns matching chunk_ids/pages.",
-                content=snippet,
+                location=location_text,
+                rationale="Direct chunk scan for rubric-required theoretical terms.",
+                content=f"occurrence_count={len(occurrences)}",
+                confidence=0.95 if found else 0.85,
+                dimension_id="theoretical_depth",
             )
         )
+
+        substantive_hits = 0
+        previews: List[str] = []
+        for hit in occurrences:
+            context_window = str(hit.get("context_window", "") or "")
+            if _is_substantive_explanation(context_window, term):
+                substantive_hits += 1
+                previews.append(context_window[:240])
+            if len(previews) >= 2:
+                break
+
+        has_substantive = substantive_hits > 0
+        evidences.append(
+            _evidence(
+                goal=f"theoretical_depth: verify substantive explanation for '{term}'",
+                found=has_substantive,
+                location=location_text,
+                rationale="Context-window check around each term occurrence to detect explanatory depth vs keyword-only mention.",
+                content=(
+                    f"substantive_hits={substantive_hits}/{len(occurrences)}"
+                    + (f"\npreview={previews[0]}" if previews else "")
+                ),
+                confidence=0.86,
+                dimension_id="theoretical_depth",
+            )
+        )
+
+        if found and not has_substantive:
+            keyword_dropping_terms.append(term)
+            evidences.append(
+                _evidence(
+                    goal=f"theoretical_depth: Keyword Dropping detected for '{term}'",
+                    found=True,
+                    location=location_text,
+                    rationale="Term appears but nearby chunk context lacks substantive implementation explanation.",
+                    content=f"flag=Keyword Dropping | term={term} | occurrences={len(occurrences)}",
+                    confidence=0.82,
+                    dimension_id="theoretical_depth",
+                )
+            )
+
+    if keyword_dropping_terms:
+        evidences.append(
+            _evidence(
+                goal="theoretical_depth: keyword-dropping summary",
+                found=True,
+                location=pdf_path,
+                rationale="Aggregated from per-term context-window checks.",
+                content=json.dumps({"keyword_dropping_terms": keyword_dropping_terms}),
+                confidence=0.84,
+                dimension_id="theoretical_depth",
+            )
+        )
+
+    claimed_paths = _extract_pdf_claimed_paths(pdf_index)
+    repo_path = (state.get("repo_path") or "").strip()
+    repo_index = _build_repo_file_index(repo_path)
+    normalized_claims = sorted(claimed_paths.keys(), key=lambda x: x.lower())
+    verified: List[Dict[str, object]] = []
+    hallucinated: List[Dict[str, object]] = []
+    for claim in normalized_claims:
+        in_repo = claim.lower() in repo_index
+        record = {"path": claim, "locations": claimed_paths.get(claim, [])[:4]}
+        if in_repo:
+            verified.append(record)
+        else:
+            hallucinated.append(record)
+
+    evidences.append(
+        _evidence(
+            goal="report_accuracy: extract file paths mentioned in PDF",
+            found=bool(normalized_claims),
+            location=pdf_path,
+            rationale="Regex extraction over all indexed PDF chunks for repository-like path claims.",
+            content=json.dumps(
+                {
+                    "path_count": len(normalized_claims),
+                    "paths_preview": normalized_claims[:25],
+                }
+            ),
+            confidence=0.90,
+            dimension_id="report_accuracy",
+        )
+    )
+
+    evidences.append(
+        _evidence(
+            goal="report_accuracy: Verified Paths list",
+            found=bool(verified),
+            location=(repo_path or "repo_path missing"),
+            rationale="Cross-checked PDF-mentioned paths against repo filesystem index.",
+            content=json.dumps({"verified_paths": verified[:40]}),
+            confidence=0.92 if repo_index else 0.55,
+            dimension_id="report_accuracy",
+        )
+    )
+    evidences.append(
+        _evidence(
+            goal="report_accuracy: Hallucinated Paths list",
+            found=bool(hallucinated),
+            location=(repo_path or "repo_path missing"),
+            rationale="Paths mentioned in PDF but absent from repository index are treated as hallucinated claims.",
+            content=json.dumps({"hallucinated_paths": hallucinated[:40]}),
+            confidence=0.92 if repo_index else 0.55,
+            dimension_id="report_accuracy",
+        )
+    )
 
     return {"evidences": {"doc": evidences}}
 
 
-def extract_images_from_pdf(pdf_path: str) -> List[str]:
+def extract_images_from_pdf(pdf_path: str) -> List[Dict[str, object]]:
     try:
         import fitz
     except Exception:
@@ -883,7 +1106,7 @@ def extract_images_from_pdf(pdf_path: str) -> List[str]:
     if not pdf_path or not os.path.isfile(pdf_path):
         return []
 
-    images_b64: List[str] = []
+    images: List[Dict[str, object]] = []
     doc = fitz.open(pdf_path)
     try:
         for page_idx in range(len(doc)):
@@ -893,11 +1116,18 @@ def extract_images_from_pdf(pdf_path: str) -> List[str]:
                 base_image = doc.extract_image(xref)
                 image_bytes = base_image.get("image", b"")
                 if image_bytes:
-                    images_b64.append(base64.b64encode(image_bytes).decode("ascii"))
+                    images.append(
+                        {
+                            "page": page_idx + 1,
+                            "xref": xref,
+                            "ext": str(base_image.get("ext", "png") or "png"),
+                            "b64": base64.b64encode(image_bytes).decode("ascii"),
+                        }
+                    )
     finally:
         doc.close()
 
-    return images_b64
+    return images
 
 
 def vision_inspector_node(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]:
@@ -918,8 +1148,8 @@ def vision_inspector_node(state: AgentState) -> Dict[str, Dict[str, List[Evidenc
             }
         }
 
-    images_b64 = extract_images_from_pdf(pdf_path)
-    if not images_b64:
+    images = extract_images_from_pdf(pdf_path)
+    if not images:
         return {
             "evidences": {
                 "vision_analysis": [
@@ -929,10 +1159,20 @@ def vision_inspector_node(state: AgentState) -> Dict[str, Dict[str, List[Evidenc
                         location=pdf_path,
                         rationale="No extractable images found in PDF.",
                         confidence=0.0,
+                        dimension_id="swarm_visual",
                     )
                 ]
             }
         }
+
+    repo_path = (state.get("repo_path") or "").strip()
+    graph_truth = {"fan_out_from_start": None, "fan_in_to_node": None}
+    graph_file = os.path.join(repo_path, "src", "graph.py") if repo_path else ""
+    if graph_file and os.path.isfile(graph_file):
+        graph_res = analyze_langgraph_graph_py(graph_file)
+        if graph_res.ok and isinstance(graph_res.data, dict):
+            graph_truth["fan_out_from_start"] = graph_res.data.get("fan_out_from_start")
+            graph_truth["fan_in_to_node"] = graph_res.data.get("fan_in_to_node")
 
     llm = ChatOllama(
         model=os.getenv("VISION_MODEL", "qwen3-vl:4b"),
@@ -941,47 +1181,116 @@ def vision_inspector_node(state: AgentState) -> Dict[str, Dict[str, List[Evidenc
         temperature=0.0,
     )
 
-    content = []
-    for b64 in images_b64[:3]:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{b64}"}
-        })
-    content.append({
-        "type": "text",
-        "text": 'Reply JSON only: {"parallel_detectives": bool, "fan_in_present": bool, "parallel_judges": bool, "diagram_type": str, "description": str}'
-    })
+    evidences: List[Evidence] = []
+    parallel_match_found = False
+    misleading_locations: List[str] = []
 
-    try:
-        raw = llm.invoke([HumanMessage(content=content)]).content
-    except Exception as e:
-        return {
-            "evidences": {
-                "vision_analysis": [
-                    _evidence(
-                        goal="Analyze architecture diagram from PDF images",
-                        found=False,
-                        location=pdf_path,
-                        rationale=f"Vision model call failed: {e!r}",
-                        confidence=0.0,
-                    )
-                ]
-            }
-        }
+    for img in images[:5]:
+        page = img.get("page")
+        xref = img.get("xref")
+        ext = str(img.get("ext", "png") or "png")
+        b64 = str(img.get("b64", "") or "")
+        location = f"{pdf_path}#page={page},image_xref={xref}"
+        content = [
+            {"type": "image_url", "image_url": {"url": f"data:image/{ext};base64,{b64}"}},
+            {
+                "type": "text",
+                "text": (
+                    'Reply JSON only with keys: '
+                    '{"diagram_type": str, "shows_parallel_detectives": bool, '
+                    '"shows_parallel_judges": bool, "shows_fan_in": bool, '
+                    '"is_linear_pipeline": bool, "contradicts_parallel_architecture": bool, '
+                    '"rationale": str}'
+                ),
+            },
+        ]
+
+        parsed: Dict[str, object] = {}
+        raw_text = ""
+        try:
+            raw = llm.invoke([HumanMessage(content=content)]).content
+            raw_text = str(raw)
+            parsed = _extract_json_object(raw)
+        except Exception as e:
+            raw_text = f"vision_error={e!r}"
+
+        if not parsed:
+            evidences.append(
+                _evidence(
+                    goal="swarm_visual: classify extracted diagram image",
+                    found=False,
+                    location=location,
+                    rationale="Vision classification failed or returned non-JSON output.",
+                    content=raw_text[:900] if raw_text else None,
+                    confidence=0.35,
+                    dimension_id="swarm_visual",
+                )
+            )
+            continue
+
+        pd = bool(parsed.get("shows_parallel_detectives", False))
+        pj = bool(parsed.get("shows_parallel_judges", False))
+        fi = bool(parsed.get("shows_fan_in", False))
+        linear = bool(parsed.get("is_linear_pipeline", False))
+        contradict = bool(parsed.get("contradicts_parallel_architecture", False))
+        diag_type = str(parsed.get("diagram_type", "") or "unknown")
+        rationale = str(parsed.get("rationale", "") or "No rationale provided.")
+
+        if pd and pj and fi and not linear and not contradict:
+            parallel_match_found = True
+        if linear or contradict:
+            misleading_locations.append(location)
+
+        evidences.append(
+            _evidence(
+                goal="swarm_visual: classify extracted diagram image",
+                found=True,
+                location=location,
+                rationale="Vision model classified diagram structure and architecture semantics.",
+                content=json.dumps(
+                    {
+                        "diagram_type": diag_type,
+                        "shows_parallel_detectives": pd,
+                        "shows_parallel_judges": pj,
+                        "shows_fan_in": fi,
+                        "is_linear_pipeline": linear,
+                        "contradicts_parallel_architecture": contradict,
+                        "rationale": rationale,
+                        "graph_truth_reference": graph_truth,
+                    }
+                )[:1200],
+                confidence=0.72,
+                dimension_id="swarm_visual",
+            )
+        )
+
+    evidences.append(
+        _evidence(
+            goal="swarm_visual: verify fan-out/fan-in architecture depiction",
+            found=parallel_match_found,
+            location=pdf_path,
+            rationale="Aggregated image classifications checked for parallel detectives + fan-in + parallel judges.",
+            content=f"parallel_match_found={parallel_match_found} | graph_truth={json.dumps(graph_truth)}",
+            confidence=0.78 if evidences else 0.5,
+            dimension_id="swarm_visual",
+        )
+    )
+
+    if misleading_locations:
+        evidences.append(
+            _evidence(
+                goal="swarm_visual: Misleading Architecture Visual detected",
+                found=True,
+                location="; ".join(misleading_locations[:6]),
+                rationale="At least one diagram appears linear or contradictory to expected graph parallelism.",
+                content=json.dumps({"misleading_locations": misleading_locations[:20]}),
+                confidence=0.80,
+                dimension_id="swarm_visual",
+            )
+        )
 
     return {
-        "evidences": {
-            "vision_analysis": [
-                _evidence(
-                    goal="Analyze architecture diagram from PDF images",
-                    found=True,
-                    location=pdf_path,
-                    rationale="Vision model analyzed extracted PDF images.",
-                    content=str(raw)[:1200],
-                    confidence=0.6,
-                )
-            ]
-        }
+        "evidences": {"vision_analysis": evidences}
     }
 
 

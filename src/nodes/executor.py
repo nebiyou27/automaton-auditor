@@ -161,7 +161,8 @@ def _tool_pdf_image_extract(state: AgentState, call: ToolCall) -> ToolResult:
     pdf_path = _resolve_pdf_path(state, call)
     if not pdf_path:
         return _tool_result(False, error="pdf_path is missing.")
-    images_b64 = extract_images_from_pdf(pdf_path)
+    images = extract_images_from_pdf(pdf_path)
+    images_b64 = [str(img.get("b64", "")) for img in images if isinstance(img, dict) and img.get("b64")]
     return _tool_result(
         ok=len(images_b64) > 0,
         data={"pdf_path": pdf_path, "image_count": len(images_b64), "images_b64": images_b64[:3]},
