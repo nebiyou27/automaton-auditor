@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from json import JSONDecodeError
 from typing import Dict, List, Optional, Tuple
 
 from langchain_ollama import ChatOllama
@@ -168,6 +169,87 @@ def _strip_think_and_noise(raw: str) -> str:
     return raw
 
 
+def _is_positive_argument(text: str) -> bool:
+    lowered = (text or "").lower()
+    positives = [
+        "meets requirement",
+        "clearly meets",
+        "all requirements are met",
+        "implemented",
+        "present",
+        "verified",
+        "strong",
+    ]
+    return any(p in lowered for p in positives)
+
+
+def _is_negative_argument(text: str) -> bool:
+    lowered = (text or "").lower()
+    negatives = [
+        "missing",
+        "not found",
+        "does not meet",
+        "failed",
+        "cannot verify",
+        "incomplete",
+        "contradicts",
+        "absent",
+    ]
+    return any(n in lowered for n in negatives)
+
+
+def _is_score_argument_inconsistent(score: int, argument: str) -> bool:
+    if _is_positive_argument(argument) and score <= 2:
+        return True
+    if _is_negative_argument(argument) and score >= 4:
+        return True
+    return False
+
+
+def _coerce_opinion(op: object, persona: str, criterion_id: str) -> Optional[JudicialOpinion]:
+    if isinstance(op, JudicialOpinion):
+        op.judge = persona  # type: ignore[assignment]
+        op.criterion_id = criterion_id
+        return op
+    if isinstance(op, dict):
+        op["judge"] = persona
+        op["criterion_id"] = criterion_id
+        return JudicialOpinion(**op)
+    return None
+
+
+def _coerce_opinion_from_raw_text(raw_text: str, persona: str, criterion_id: str) -> Optional[JudicialOpinion]:
+    cleaned = _strip_think_and_noise(raw_text)
+    if not cleaned:
+        return None
+
+    try:
+        parsed = json.loads(cleaned)
+    except JSONDecodeError:
+        # Try to recover JSON object if the model adds extra wrapper text.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            parsed = json.loads(cleaned[start : end + 1])
+        except JSONDecodeError:
+            return None
+
+    if isinstance(parsed, dict):
+        # Common wrapper shapes produced by local models.
+        for key in ("opinion", "result", "output", "data", "judicial_opinion"):
+            candidate = parsed.get(key)
+            if isinstance(candidate, dict):
+                parsed = candidate
+                break
+
+        if isinstance(parsed.get("cited_evidence"), str):
+            parsed["cited_evidence"] = [parsed["cited_evidence"]]
+
+    return _coerce_opinion(parsed, persona, criterion_id)
+
+
 def _fallback_opinions(persona: str, criterion_ids: List[str], message: str, score: int = 3) -> List[JudicialOpinion]:
     if not criterion_ids:
         criterion_ids = ["rubric_load_failed"]
@@ -210,20 +292,40 @@ Evidence:
 def _invoke_structured(prompt: str, persona: str, criterion_id: str) -> JudicialOpinion:
     _llm, _structured_llm = _get_structured_llm()
     try:
-        op = _structured_llm.invoke(prompt)
-        if isinstance(op, JudicialOpinion):
-            op.judge = persona  # type: ignore[assignment]
-            op.criterion_id = criterion_id
+        op = _coerce_opinion(_structured_llm.invoke(prompt), persona, criterion_id)
+        if op and _is_score_argument_inconsistent(op.score, op.argument):
+            retry_prompt = (
+                f"{prompt}\n\n"
+                "Validation step: Your previous score and argument sentiment were inconsistent. "
+                "Return corrected JSON where score strictly matches the argument and scoring guide."
+            )
+            retried = _coerce_opinion(_structured_llm.invoke(retry_prompt), persona, criterion_id)
+            if retried:
+                return retried
+        if op:
             return op
-        if isinstance(op, dict):
-            op["judge"] = persona
-            op["criterion_id"] = criterion_id
-            return JudicialOpinion(**op)
     except Exception:
-        try:
-            _strip_think_and_noise(str(_llm.invoke(prompt).content))
-        except Exception:
-            pass
+        pass
+
+    try:
+        raw = _llm.invoke(prompt)
+        raw_text = str(getattr(raw, "content", raw))
+        op = _coerce_opinion_from_raw_text(raw_text, persona, criterion_id)
+        if op:
+            if _is_score_argument_inconsistent(op.score, op.argument):
+                retry_prompt = (
+                    f"{prompt}\n\n"
+                    "Validation step: Your previous score and argument sentiment were inconsistent. "
+                    "Return corrected JSON where score strictly matches the argument and scoring guide."
+                )
+                retried_raw = _llm.invoke(retry_prompt)
+                retried_text = str(getattr(retried_raw, "content", retried_raw))
+                retried = _coerce_opinion_from_raw_text(retried_text, persona, criterion_id)
+                if retried:
+                    return retried
+            return op
+    except Exception:
+        pass
 
     return JudicialOpinion(
         judge=persona,  # type: ignore[arg-type]

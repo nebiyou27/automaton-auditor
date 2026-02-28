@@ -53,6 +53,7 @@ pydantic==2.12.5
 pydantic_core==2.41.5
 pyparsing==3.3.2
 PyPDF2==3.0.1
+pymupdf==1.27.1
 python-dotenv==1.2.1
 PyYAML==6.0.3
 requests==2.32.5

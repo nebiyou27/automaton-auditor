@@ -10,7 +10,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from langchain_core.messages import HumanMessage
 from langchain_ollama import ChatOllama
@@ -81,6 +81,108 @@ def _read_text_file(path: str, max_chars: int = 2000) -> tuple[bool, str]:
         return False, f"Read failed: {e!r}"
 
 
+REQUIRED_CHECKS_BY_CRITERION: Dict[str, List[Dict[str, str]]] = {
+    "typed_state_definitions": [
+        {"tool": "check_file_exists", "target": "src/state.py", "reason": "State typing source must exist."},
+        {"tool": "grep_search", "target": "class Evidence(BaseModel)", "reason": "Verify BaseModel evidence type."},
+        {"tool": "grep_search", "target": "class JudicialOpinion(BaseModel)", "reason": "Verify BaseModel opinion type."},
+        {"tool": "grep_search", "target": "operator.ior", "reason": "Verify parallel-safe evidence reducer."},
+        {"tool": "grep_search", "target": "operator.add", "reason": "Verify parallel-safe opinion reducer."},
+    ],
+    "forensic_tool_engineering": [
+        {"tool": "check_file_exists", "target": "src/tools/repo_tools.py", "reason": "Tool implementation file must exist."},
+        {"tool": "grep_search", "target": "TemporaryDirectory(", "reason": "Verify sandboxed clone lifecycle."},
+        {"tool": "grep_search", "target": "query_pdf_chunks", "reason": "Verify PDF query interface exists."},
+        {"tool": "grep_search", "target": "os.system(", "reason": "Detect unsafe shell usage if present."},
+        {"tool": "grep_search", "target": "try:", "reason": "Find explicit exception handling in tooling."},
+    ],
+    "detective_node_implementation": [
+        {"tool": "check_file_exists", "target": "src/nodes/detectives.py", "reason": "Detective node implementation must exist."},
+        {"tool": "grep_search", "target": "def repo_investigator", "reason": "Verify repo detective entrypoint exists."},
+        {"tool": "grep_search", "target": "Evidence(", "reason": "Verify structured Evidence object creation."},
+        {"tool": "grep_search", "target": "found=False", "reason": "Verify missing-artifact handling paths."},
+    ],
+    "partial_graph_orchestration": [
+        {"tool": "check_file_exists", "target": "src/graph.py", "reason": "Graph orchestration file must exist."},
+        {"tool": "grep_search", "target": "StateGraph(", "reason": "Verify graph compilation wiring exists."},
+        {"tool": "grep_search", "target": "add_edge(", "reason": "Verify edge wiring for fan-in/fan-out."},
+        {"tool": "grep_search", "target": "add_conditional_edges(", "reason": "Verify conditional routing exists."},
+    ],
+    "project_infrastructure": [
+        {"tool": "check_file_exists", "target": "README.md", "reason": "README is required for reproducible setup."},
+        {"tool": "check_file_exists", "target": ".env.example", "reason": "Example environment file is required."},
+        {"tool": "check_file_exists", "target": "requirements.txt", "reason": "Dependency manifest should exist."},
+        {"tool": "check_file_exists", "target": "requirements.lock", "reason": "Dependency lock file should exist."},
+        {"tool": "grep_search", "target": "LANGCHAIN_API_KEY=", "reason": "Detect committed hardcoded secret values."},
+    ],
+    "judicial_nuance_dialectics": [
+        {"tool": "check_file_exists", "target": "src/nodes/judges.py", "reason": "Judge personas implementation should exist."},
+        {"tool": "check_file_exists", "target": "src/nodes/justice.py", "reason": "Chief justice synthesis should exist."},
+        {"tool": "grep_search", "target": "JudicialOpinion", "reason": "Verify structured judicial output type."},
+        {"tool": "grep_search", "target": "criterion_id", "reason": "Verify mapping opinions to rubric criteria IDs."},
+    ],
+}
+
+
+def _execute_tool_check(tool_name: str, target: str, repo_path: str) -> Tuple[bool, str, str]:
+    result = ""
+    found = False
+    location = target or repo_path
+
+    if tool_name == "check_file_exists":
+        full = os.path.join(repo_path, target)
+        found = os.path.exists(full)
+        result = f"exists={found}"
+        location = target
+
+    elif tool_name == "read_file":
+        full = os.path.join(repo_path, target)
+        ok, content = _read_text_file(full, max_chars=2000)
+        found = ok
+        result = content[:500] if ok else content
+        location = target
+
+    elif tool_name == "grep_search":
+        matches = []
+        for py_file in Path(repo_path).rglob("*.py"):
+            try:
+                text = py_file.read_text(encoding="utf-8", errors="ignore")
+                for i, line in enumerate(text.splitlines(), 1):
+                    if target.lower() in line.lower():
+                        matches.append(f"{py_file.relative_to(repo_path)}:{i}: {line.strip()}")
+            except Exception:
+                continue
+        found = len(matches) > 0
+        result = "\n".join(matches[:10])
+        location = target
+
+    elif tool_name == "ast_parse":
+        full = os.path.join(repo_path, target)
+        res = analyze_langgraph_graph_py(full)
+        found = res.ok
+        result = str(res.data)[:500] if res.ok else str(res.error)
+        location = target
+
+    elif tool_name == "git_log":
+        res = extract_git_history(repo_path)
+        found = res.ok
+        result = str(res.data)[:500] if res.ok else str(res.error)
+        location = ".git/log"
+
+    else:
+        result = f"Unsupported tool: {tool_name}"
+
+    if tool_name == "grep_search" and "os.system(" in target and found:
+        found = False
+        result = f"Unsafe usage detected\n{result}"
+
+    if tool_name == "grep_search" and "LANGCHAIN_API_KEY=" in target and found:
+        found = False
+        result = f"Potential committed secret pattern detected\n{result}"
+
+    return found, result, location
+
+
 def _run_dynamic_plan_checks(state: AgentState, repo_path: str, dimensions: List[dict]) -> List[Evidence]:
     llm = ChatOllama(
         model=os.getenv("OLLAMA_MODEL", "deepseek-r1:8b"),
@@ -101,6 +203,34 @@ def _run_dynamic_plan_checks(state: AgentState, repo_path: str, dimensions: List
     all_evidences: List[Evidence] = []
 
     for dim in dimensions:
+        dim_id = str(dim.get("id", "") or "unknown_criterion")
+        required_checks = REQUIRED_CHECKS_BY_CRITERION.get(dim_id, [])
+        executed_signatures = set()
+
+        for check in required_checks:
+            tool_name = check.get("tool", "")
+            target = check.get("target", "")
+            reason = check.get("reason", "")
+            signature = f"{tool_name}|{target}"
+            executed_signatures.add(signature)
+            try:
+                found, result, location = _execute_tool_check(tool_name, target, repo_path)
+            except Exception as e:
+                found = False
+                result = f"Execution error: {e!r}"
+                location = target or repo_path
+
+            all_evidences.append(
+                _evidence(
+                    goal=f"Required check [{dim_id}]: {tool_name} on '{target}'",
+                    found=found,
+                    location=location,
+                    rationale=reason,
+                    content=str(result)[:500] if result else None,
+                    confidence=0.9,
+                )
+            )
+
         prompt = f"""You are a forensic investigator.
 Rubric criterion: {json.dumps(dim, indent=2)}
 Available tools: {tool_menu}
@@ -114,7 +244,7 @@ Reply JSON only: {{"checks": [{{"tool": str, "target": str, "reason": str}}]}}""
         except Exception as e:
             all_evidences.append(
                 _evidence(
-                    goal=f"LLM investigation plan for: {dim['id']}",
+                    goal=f"LLM investigation plan for: {dim_id}",
                     found=False,
                     location="rubric/week2_rubric.json",
                     rationale=f"LLM plan generation failed: {e!r}",
@@ -125,7 +255,7 @@ Reply JSON only: {{"checks": [{{"tool": str, "target": str, "reason": str}}]}}""
 
         all_evidences.append(
             _evidence(
-                goal=f"LLM investigation plan for: {dim['id']}",
+                goal=f"LLM investigation plan for: {dim_id}",
                 found=True,
                 location="rubric/week2_rubric.json",
                 rationale=f"LLM dynamically selected {len(checks)} checks for this criterion.",
@@ -137,10 +267,10 @@ Reply JSON only: {{"checks": [{{"tool": str, "target": str, "reason": str}}]}}""
         if not checks:
             all_evidences.append(
                 _evidence(
-                    goal=f"Dynamic execution skipped: no checks selected for {dim['id']}",
+                    goal=f"Dynamic execution skipped: no checks selected for {dim_id}",
                     found=False,
                     location="rubric/week2_rubric.json",
-                    rationale="LLM produced an empty investigation plan; no executable checks available.",
+                    rationale="LLM produced an empty investigation plan; required baseline checks were still executed.",
                     confidence=1.0,
                 )
             )
@@ -150,56 +280,23 @@ Reply JSON only: {{"checks": [{{"tool": str, "target": str, "reason": str}}]}}""
             tool_name = check.get("tool", "")
             target = check.get("target", "")
             reason = check.get("reason", "")
+            signature = f"{tool_name}|{target}"
+            if signature in executed_signatures:
+                continue
             result = None
             found = False
-
+            location = target or repo_path
             try:
-                if tool_name == "check_file_exists":
-                    full = os.path.join(repo_path, target)
-                    found = os.path.exists(full)
-                    result = f"exists={found}"
-
-                elif tool_name == "read_file":
-                    full = os.path.join(repo_path, target)
-                    ok, content = _read_text_file(full, max_chars=2000)
-                    found = ok
-                    result = content[:500] if ok else content
-
-                elif tool_name == "grep_search":
-                    matches = []
-                    for py_file in Path(repo_path).rglob("*.py"):
-                        try:
-                            text = py_file.read_text(encoding="utf-8", errors="ignore")
-                            for i, line in enumerate(text.splitlines(), 1):
-                                if target.lower() in line.lower():
-                                    matches.append(f"{py_file.relative_to(repo_path)}:{i}: {line.strip()}")
-                        except Exception:
-                            continue
-                    found = len(matches) > 0
-                    result = "\n".join(matches[:10])
-
-                elif tool_name == "ast_parse":
-                    full = os.path.join(repo_path, target)
-                    res = analyze_langgraph_graph_py(full)
-                    found = res.ok
-                    result = str(res.data)[:500] if res.ok else res.error
-
-                elif tool_name == "git_log":
-                    res = extract_git_history(repo_path)
-                    found = res.ok
-                    result = str(res.data)[:500] if res.ok else res.error
-                else:
-                    result = f"Unsupported tool: {tool_name}"
-
+                found, result, location = _execute_tool_check(tool_name, target, repo_path)
             except Exception as e:
                 found = False
                 result = f"Execution error: {e!r}"
 
             all_evidences.append(
                 _evidence(
-                    goal=f"Dynamic check [{dim['id']}]: {tool_name} on '{target}'",
+                    goal=f"Dynamic check [{dim_id}]: {tool_name} on '{target}'",
                     found=found,
-                    location=target or repo_path,
+                    location=location,
                     rationale=reason,
                     content=str(result)[:500] if result else None,
                     confidence=0.75,

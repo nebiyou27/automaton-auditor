@@ -154,6 +154,43 @@ def _audit_blockers(evidences: Dict[str, List[object]]) -> List[str]:
     return blockers
 
 
+def _is_positive_argument(text: str) -> bool:
+    lowered = (text or "").lower()
+    positives = [
+        "meets requirement",
+        "clearly meets",
+        "all requirements are met",
+        "implemented",
+        "present",
+        "verified",
+        "strong",
+    ]
+    return any(p in lowered for p in positives)
+
+
+def _is_negative_argument(text: str) -> bool:
+    lowered = (text or "").lower()
+    negatives = [
+        "missing",
+        "not found",
+        "does not meet",
+        "failed",
+        "cannot verify",
+        "incomplete",
+        "contradicts",
+        "absent",
+    ]
+    return any(n in lowered for n in negatives)
+
+
+def _is_score_argument_inconsistent(op: JudicialOpinion) -> bool:
+    if _is_positive_argument(op.argument) and op.score <= 2:
+        return True
+    if _is_negative_argument(op.argument) and op.score >= 4:
+        return True
+    return False
+
+
 def generate_markdown_report(state: AgentState, rules: dict) -> str:
     grouped = _group_by_criterion(state.get("opinions", []) or [])
     evidences = state.get("evidences", {}) or {}
@@ -170,6 +207,7 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
     remediation: List[str] = []
     total = 0
     count = 0
+    contradiction_count = 0
 
     for criterion_id, ops in grouped.items():
         if ops:
@@ -185,6 +223,11 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
             dissent_lines.append(f"- **{op.judge}** (Score {op.score}/5): {op.argument}")
             if op.cited_evidence:
                 dissent_lines.append(f"  - Cited: {', '.join(op.cited_evidence)}")
+            if _is_score_argument_inconsistent(op):
+                contradiction_count += 1
+                dissent_lines.append(
+                    "  - Consistency note: score appears misaligned with argument sentiment."
+                )
 
         if security_override_active and final_score > security_cap:
             final_score = security_cap
@@ -222,6 +265,8 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
 
     executive_extras: List[str] = []
     executive_extras.append(f"- **Audit Status:** {'INCOMPLETE_AUDIT' if incomplete_audit else 'COMPLETE'}")
+    if contradiction_count:
+        executive_extras.append(f"- **Judge Consistency Alerts:** {contradiction_count}")
     if "dissent_requirement" in rules:
         executive_extras.append(f"- **Dissent Requirement:** {rules.get('dissent_requirement')}")
 
