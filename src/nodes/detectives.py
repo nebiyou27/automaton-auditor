@@ -37,7 +37,7 @@ def _evidence(
     rationale: str,
     content: str | None = None,
     confidence: float = 1.0,
-    dimension_id: str = "",
+    dimension_id: str = "unscoped",
 ) -> Evidence:
     return Evidence(
         goal=goal,

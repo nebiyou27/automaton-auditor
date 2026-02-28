@@ -8,6 +8,8 @@ from typing import Dict, List, Tuple
 from src.rubric_ids import CANONICAL_DIMENSION_ID_SET, normalize_dimension_id
 from src.state import AgentState, Evidence, ToolCall
 
+PDF_ONLY_DIMENSIONS = {"theoretical_depth", "report_accuracy", "swarm_visual"}
+
 
 def _to_text(value: object) -> str:
     if value is None:
@@ -152,6 +154,7 @@ def planner_node(state: AgentState) -> Dict[str, object]:
     evidence_rows = _flatten_evidence(state)
     ranked: List[Tuple[int, dict, str]] = []
     validation: List[Evidence] = []
+    has_pdf = bool((state.get("pdf_path") or "").strip())
 
     for idx, dim in enumerate(dimensions):
         if not isinstance(dim, dict):
@@ -200,6 +203,21 @@ def planner_node(state: AgentState) -> Dict[str, object]:
 
         dim = dict(dim)
         dim["id"] = dim_id
+        target_artifact = _to_text(dim.get("target_artifact", "")).strip().lower()
+
+        # Do not dispatch PDF-only work when no PDF is provided.
+        if (not has_pdf) and (
+            dim_id in PDF_ONLY_DIMENSIONS or target_artifact in {"pdf_report", "pdf_images"}
+        ):
+            validation.append(
+                _validation_evidence(
+                    dim_id,
+                    True,
+                    "Dimension marked not applicable for this run because pdf_path is empty.",
+                    f"id={dim_id}, target_artifact={target_artifact or 'n/a'}",
+                )
+            )
+            continue
 
         related = []
         for bucket, ev in evidence_rows:

@@ -1,7 +1,7 @@
 import operator
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing_extensions import NotRequired, TypedDict
 
 
@@ -23,9 +23,15 @@ class Evidence(BaseModel):
         description="Confidence score from 0.0 to 1.0."
     )
     dimension_id: str = Field(
-        default="",
+        default="unscoped",
         description="Rubric dimension id this evidence supports."
     )
+
+    @field_validator("dimension_id", mode="before")
+    @classmethod
+    def _normalize_dimension_id(cls, v: object) -> str:
+        text = str(v or "").strip()
+        return text if text else "unscoped"
 
 
 class JudicialOpinion(BaseModel):

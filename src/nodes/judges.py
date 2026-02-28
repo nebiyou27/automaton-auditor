@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from json import JSONDecodeError
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_ollama import ChatOllama

@@ -207,6 +207,15 @@ def reflector_node(state: AgentState) -> Dict[str, object]:
             f"iter={next_iter}/{max_iters}, budget={tools_used}/{tool_budget}."
         )
 
+    # Explicit missing-evidence signal for graph conditional routing.
+    severe_missing_evidence = bool(applicable) and all(r.coverage == 0.0 for r in applicable)
+    error_type = "missing_evidence" if severe_missing_evidence and stop else ""
+    error_message = (
+        "No applicable rubric dimensions have supporting evidence coverage."
+        if error_type
+        else ""
+    )
+
     return {
         "reflections": reflections,
         "iteration": next_iter,
@@ -215,6 +224,9 @@ def reflector_node(state: AgentState) -> Dict[str, object]:
             reason=reason,
             remaining_risks=remaining_risks[:12],
         ),
+        "error_type": error_type,
+        "error_message": error_message,
+        "failed_node": "reflector" if error_type else "",
     }
 
 

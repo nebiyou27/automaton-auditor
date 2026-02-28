@@ -38,7 +38,10 @@ def _route_doc_analyst(state: AgentState) -> Literal["doc_analyst", "skip_doc_an
     return "doc_analyst" if pdf_path else "skip_doc_analyst"
 
 
-def _route_reflector(state: AgentState) -> Literal["planner", "judge_gate"]:
+def _route_reflector(state: AgentState) -> Literal["planner", "judge_gate", "error_handler"]:
+    error_type = (state.get("error_type") or "").strip()
+    if error_type == "missing_evidence":
+        return "error_handler"
     stop_decision = state.get("stop_decision")
     if stop_decision is None:
         return "planner"
@@ -147,6 +150,7 @@ def build_graph():
         {
             "planner": "planner",
             "judge_gate": "judge_gate",
+            "error_handler": "error_handler",
         },
     )
     builder.add_edge("judge_gate", "prosecutor")

@@ -90,7 +90,7 @@ def judge_repair_node(state: AgentState) -> Dict[str, object]:
             )
 
     repair_evidence = Evidence(
-        dimension_id="",
+        dimension_id="chief_justice_synthesis",
         goal="JudgeRepair synthesized fallback judicial opinions after schema failures",
         found=len(failures) > 0,
         location="src/nodes/judges.py",
