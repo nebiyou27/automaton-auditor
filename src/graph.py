@@ -2,7 +2,7 @@
 # ============
 # Full graph orchestration:
 #   Fan-Out detectives -> Fan-In evidence aggregator ->
-#   Fan-Out judges -> Fan-In Chief Justice -> END
+#   Planner -> Fan-Out judges -> Fan-In Chief Justice -> END
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from src.nodes.detectives import (
     vision_inspector_node,
 )
 from src.nodes.aggregator import evidence_aggregator
+from src.nodes.planner import planner_node
 from src.nodes.skip import skip_doc_analyst
 from src.nodes.judges import prosecutor_judge, defense_judge, techlead_judge
 from src.nodes.justice import chief_justice
@@ -38,8 +39,9 @@ def build_graph():
     Digital Courtroom graph:
     1) Detectives run in parallel (fan-out)
     2) EvidenceAggregator synchronizes (fan-in)
-    3) Judges run in parallel (fan-out)
-    4) Chief Justice synthesizes deterministically (fan-in)
+    3) Planner proposes next 1-3 tool calls + stop decision
+    4) Judges run in parallel (fan-out)
+    5) Chief Justice synthesizes deterministically (fan-in)
     """
     builder = StateGraph(AgentState)
 
@@ -53,6 +55,7 @@ def build_graph():
 
     # Fan-in evidence sync
     builder.add_node("evidence_aggregator", evidence_aggregator)
+    builder.add_node("planner", planner_node)
 
     # Judicial bench
     builder.add_node("prosecutor", prosecutor_judge)
@@ -82,9 +85,10 @@ def build_graph():
     builder.add_edge("vision_inspector", "evidence_aggregator")
 
     # ── Judicial fan-out ──────────────────────────────────────────────────────
-    builder.add_edge("evidence_aggregator", "prosecutor")
-    builder.add_edge("evidence_aggregator", "defense")
-    builder.add_edge("evidence_aggregator", "techlead")
+    builder.add_edge("evidence_aggregator", "planner")
+    builder.add_edge("planner", "prosecutor")
+    builder.add_edge("planner", "defense")
+    builder.add_edge("planner", "techlead")
 
     # ── Judicial fan-in to Chief Justice ──────────────────────────────────────
     builder.add_edge("prosecutor", "chief_justice")

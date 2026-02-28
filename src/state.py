@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 from typing_extensions import NotRequired, TypedDict
@@ -39,6 +39,37 @@ class JudicialOpinion(BaseModel):
     )
 
 
+class ToolCall(BaseModel):
+    """
+    Planned tool execution candidate for the next audit step.
+    """
+    dimension_id: str = Field(description="Rubric dimension id this tool call targets.")
+    tool_name: str = Field(description="Tool identifier to execute.")
+    args: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Tool arguments payload."
+    )
+    why: str = Field(description="Why this tool call should run now.")
+    expected_evidence: str = Field(description="What evidence this call is expected to produce.")
+    priority: int = Field(
+        ge=1,
+        le=5,
+        description="1 (lowest) to 5 (highest) priority."
+    )
+
+
+class StopDecision(BaseModel):
+    """
+    Planner stop/go decision based on remaining forensic risk.
+    """
+    stop: bool = Field(description="Whether the audit can stop safely.")
+    reason: str = Field(description="Short rationale for stop/go.")
+    remaining_risks: List[str] = Field(
+        default_factory=list,
+        description="Risks that still require evidence collection."
+    )
+
+
 class AgentState(TypedDict):
     """
     Shared state container passed between LangGraph nodes.
@@ -62,5 +93,8 @@ class AgentState(TypedDict):
         List[JudicialOpinion],
         operator.add
     ]
+
+    planned_tool_calls: NotRequired[List[ToolCall]]
+    stop_decision: NotRequired[StopDecision]
 
     final_report: str

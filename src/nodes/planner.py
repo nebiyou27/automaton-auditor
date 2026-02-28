@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+from typing import Dict, List, Tuple
+
+from src.state import AgentState, StopDecision, ToolCall
+
+
+def _to_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _load_rubric(state: AgentState) -> dict:
+    rubric_path = (state.get("rubric_path") or "rubric/week2_rubric.json").strip()
+    if not os.path.isabs(rubric_path):
+        rubric_path = os.path.join(os.getcwd(), rubric_path)
+    if not os.path.exists(rubric_path):
+        return {"dimensions": []}
+    try:
+        with open(rubric_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"dimensions": []}
+    except Exception:
+        return {"dimensions": []}
+
+
+def _flatten_evidence(state: AgentState) -> List[Tuple[str, object]]:
+    evidences = state.get("evidences", {}) or {}
+    rows: List[Tuple[str, object]] = []
+    for bucket, items in evidences.items():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            rows.append((str(bucket), item))
+    return rows
+
+
+def _evidence_item_text(bucket: str, ev: object) -> str:
+    if isinstance(ev, dict):
+        parts = [
+            bucket,
+            _to_text(ev.get("goal")),
+            _to_text(ev.get("location")),
+            _to_text(ev.get("rationale")),
+            _to_text(ev.get("content")),
+        ]
+    else:
+        parts = [
+            bucket,
+            _to_text(getattr(ev, "goal", "")),
+            _to_text(getattr(ev, "location", "")),
+            _to_text(getattr(ev, "rationale", "")),
+            _to_text(getattr(ev, "content", "")),
+        ]
+    return " ".join(parts).lower()
+
+
+def _extract_paths(text: str) -> List[str]:
+    path_like = re.findall(r"(?:src|rubric|audit|tests)/[A-Za-z0-9_./-]+", text)
+    quoted = re.findall(r"[\"']([^\"']+)[\"']", text)
+    out: List[str] = []
+    for p in path_like + quoted:
+        clean = p.strip()
+        if clean and "/" in clean and len(clean) < 220:
+            out.append(clean)
+    return out
+
+
+def _choose_tool_for_dimension(dimension: dict, seen_tools: set[str]) -> Tuple[str, Dict[str, object], str]:
+    instruction = _to_text(dimension.get("forensic_instruction", "")).lower()
+    dim_id = _to_text(dimension.get("id", ""))
+    paths = _extract_paths(_to_text(dimension.get("forensic_instruction", "")))
+
+    if "git log" in instruction or "commit" in instruction:
+        return "git_log", {}, "Extract commit progression and timestamp evidence."
+
+    if ("stategraph" in instruction or "add_edge" in instruction or "ast" in instruction) and "ast_parse" not in seen_tools:
+        path = "src/graph.py"
+        for p in paths:
+            if p.endswith(".py"):
+                path = p
+                break
+        return "ast_parse", {"path": path}, "Parse graph/state structure to verify orchestration claims."
+
+    if "typeddict" in instruction or "basemodel" in instruction or "operator.add" in instruction:
+        return "ast_parse", {"path": "src/state.py"}, "Validate typed state and reducer wiring."
+
+    if "pdf" in instruction and ("image" in instruction or "diagram" in instruction):
+        return (
+            "extract_images_from_pdf",
+            {"pdf_path": "$state.pdf_path"},
+            "Extract report visuals for architecture-diagram verification.",
+        )
+
+    if "pdf" in instruction:
+        terms = []
+        for key in ["Dialectical Synthesis", "Fan-In / Fan-Out", "Metacognition", "State Synchronization"]:
+            if key.lower() in instruction:
+                terms.append(key)
+        query = terms[0] if terms else dim_id.replace("_", " ")
+        return "query_pdf_chunks", {"query": query, "top_k": 3}, "Retrieve report text evidence for claimed concepts."
+
+    if paths:
+        if "check_file_exists" not in seen_tools:
+            return "check_file_exists", {"path": paths[0]}, "Verify claimed file exists before deeper checks."
+        return "read_file", {"path": paths[0], "chars": 2200}, "Read cited file to validate implementation details."
+
+    return "grep_search", {"term": dim_id.replace("_", " ")}, "Search codebase for rubric-specific implementation evidence."
+
+
+def _is_found(ev: object) -> bool:
+    if isinstance(ev, dict):
+        return bool(ev.get("found", False))
+    return bool(getattr(ev, "found", False))
+
+
+def _summarize_coverage(state: AgentState) -> Dict[str, Dict[str, int]]:
+    evidences = state.get("evidences", {}) or {}
+    summary: Dict[str, Dict[str, int]] = {}
+    for bucket, items in evidences.items():
+        if not isinstance(items, list):
+            continue
+        total = len(items)
+        found = sum(1 for ev in items if _is_found(ev))
+        summary[str(bucket)] = {"found": found, "total": total}
+    return summary
+
+
+def planner_node(state: AgentState) -> Dict[str, object]:
+    rubric = _load_rubric(state)
+    dimensions = rubric.get("dimensions", [])
+    if not isinstance(dimensions, list):
+        dimensions = []
+
+    evidence_rows = _flatten_evidence(state)
+    ranked: List[Tuple[int, dict, str]] = []
+
+    for dim in dimensions:
+        if not isinstance(dim, dict):
+            continue
+        dim_id = _to_text(dim.get("id", "")).strip()
+        dim_name = _to_text(dim.get("name", "")).strip()
+        if not dim_id:
+            continue
+
+        related = []
+        for bucket, ev in evidence_rows:
+            hay = _evidence_item_text(bucket, ev)
+            if dim_id.lower() in hay or (dim_name and dim_name.lower() in hay):
+                related.append(ev)
+
+        if not related:
+            risk = 100
+            reason = f"{dim_id}: no evidence linked to this dimension."
+        else:
+            found_count = sum(1 for ev in related if _is_found(ev))
+            missing_count = len(related) - found_count
+            risk = missing_count * 20 + (0 if found_count else 40)
+            reason = f"{dim_id}: found={found_count}, missing={missing_count}."
+
+        ranked.append((risk, dim, reason))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+
+    planned_calls: List[ToolCall] = []
+    seen_tools: set[str] = set()
+    for risk, dim, reason in ranked:
+        if risk <= 0:
+            continue
+        if len(planned_calls) >= 3:
+            break
+
+        tool_name, args, expected = _choose_tool_for_dimension(dim, seen_tools)
+        seen_tools.add(tool_name)
+        priority = 5 if risk >= 100 else (4 if risk >= 60 else (3 if risk >= 30 else 2))
+
+        planned_calls.append(
+            ToolCall(
+                dimension_id=_to_text(dim.get("id", "")),
+                tool_name=tool_name,
+                args=args,
+                why=f"Highest remaining risk. {reason}",
+                expected_evidence=expected,
+                priority=priority,
+            )
+        )
+
+    remaining_risks: List[str] = [reason for risk, _, reason in ranked if risk >= 40]
+    stop = len(planned_calls) == 0
+    if stop:
+        decision_reason = "Current evidence appears sufficient across rubric dimensions."
+    else:
+        decision_reason = f"Additional evidence needed for {len(remaining_risks) or len(planned_calls)} dimensions."
+
+    coverage = _summarize_coverage(state)
+    coverage_line = ", ".join(
+        [f"{bucket}:{vals['found']}/{vals['total']}" for bucket, vals in coverage.items()]
+    )
+    if coverage_line:
+        decision_reason = f"{decision_reason} Coverage={coverage_line}."
+
+    stop_decision = StopDecision(
+        stop=stop,
+        reason=decision_reason,
+        remaining_risks=remaining_risks[:10],
+    )
+
+    return {
+        "planned_tool_calls": planned_calls[:3],
+        "stop_decision": stop_decision,
+    }
