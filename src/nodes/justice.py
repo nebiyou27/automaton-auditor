@@ -122,9 +122,43 @@ def _load_synthesis_rules(rubric_path: str) -> dict:
         return {}
 
 
+def _is_found(ev: object) -> bool:
+    if isinstance(ev, dict):
+        return bool(ev.get("found", False))
+    return bool(getattr(ev, "found", False))
+
+
+def _get_goal(ev: object) -> str:
+    if isinstance(ev, dict):
+        return str(ev.get("goal", "") or "")
+    return str(getattr(ev, "goal", "") or "")
+
+
+def _audit_blockers(evidences: Dict[str, List[object]]) -> List[str]:
+    blockers: List[str] = []
+
+    repo_items = evidences.get("repo", []) or []
+    clone_failed = any(
+        ("clone repository in sandbox" in _get_goal(ev).lower()) and (not _is_found(ev))
+        for ev in repo_items
+    )
+    if clone_failed:
+        blockers.append("Repository clone/access failed, so repo-backed evidence is incomplete.")
+
+    dynamic_items = evidences.get("dynamic_plan", []) or []
+    has_plan = any("llm investigation plan for:" in _get_goal(ev).lower() for ev in dynamic_items)
+    has_execution = any(_get_goal(ev).startswith("Dynamic check [") for ev in dynamic_items)
+    if has_plan and not has_execution:
+        blockers.append("Only plan evidence was produced for dynamic checks; execution evidence is missing.")
+
+    return blockers
+
+
 def generate_markdown_report(state: AgentState, rules: dict) -> str:
     grouped = _group_by_criterion(state.get("opinions", []) or [])
     evidences = state.get("evidences", {}) or {}
+    blockers = _audit_blockers(evidences)
+    incomplete_audit = len(blockers) > 0
     security_rule = str(rules.get("security_override", "") or "")
     security_cap = _extract_cap_from_rule(security_rule, default=3)
     security_override_active = bool(security_rule) and _has_security_override(evidences, security_rule)
@@ -187,6 +221,7 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
         remediation.append("- No urgent remediation required based on current scoring.")
 
     executive_extras: List[str] = []
+    executive_extras.append(f"- **Audit Status:** {'INCOMPLETE_AUDIT' if incomplete_audit else 'COMPLETE'}")
     if "dissent_requirement" in rules:
         executive_extras.append(f"- **Dissent Requirement:** {rules.get('dissent_requirement')}")
 
@@ -195,6 +230,26 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
         fact_supremacy_section = f"""
 ## Synthesis Notes
 - **Fact Supremacy:** {rules.get("fact_supremacy")}
+"""
+
+    if incomplete_audit:
+        blocker_lines = "\n".join([f"- {b}" for b in blockers])
+        return f"""# AUTOMATON AUDITOR - FINAL VERDICT
+
+## Executive Summary
+- **Repository:** {state.get("repo_url", "N/A")}
+- **PDF:** {state.get("pdf_path", "N/A") or "None"}
+- **Overall Score:** N/A (incomplete audit)
+- **Evidence Coverage:**
+{chr(10).join(evidence_summary) if evidence_summary else "- No evidence collected."}
+{chr(10).join(executive_extras) if executive_extras else ""}
+
+## Blocking Issues
+{blocker_lines}
+
+## Remediation Plan
+- Resolve blocking issues above, rerun detectives, then regenerate judicial verdict.
+{fact_supremacy_section}
 """
 
     # FIXED: C11a

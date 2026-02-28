@@ -14,7 +14,6 @@ import tempfile
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from langchain_core.tools import tool
 from PyPDF2 import PdfReader
 
 
@@ -177,7 +176,6 @@ def grep_search(repo_path: str, term: str) -> ToolResult:
     return ToolResult(ok=True, data={"term": term, "count": len(matches), "matches": matches})
 
 
-@tool
 def analyze_langgraph_graph_py(graph_file_path: str) -> ToolResult:
     """Analyze a Python graph file via AST to detect StateGraph wiring and edge patterns. Input expects graph_file_path to a Python file. Returns a ToolResult with structural findings or a parse/read error."""
     ok, source_or_err = _read_text_file(graph_file_path)
@@ -240,7 +238,6 @@ def analyze_langgraph_graph_py(graph_file_path: str) -> ToolResult:
     return ToolResult(ok=True, data=findings)
 
 
-@tool
 def find_typed_state_definitions(state_file_path: str) -> ToolResult:
     """Inspect a state module with AST for class inheritance and reducer annotation usage. Input expects state_file_path to a Python source file. Returns a ToolResult with discovered structural facts or an error."""
     ok, source_or_err = _read_text_file(state_file_path)
@@ -290,7 +287,6 @@ def _tokenize(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower())
 
 
-@tool
 def ingest_pdf_for_query(
     pdf_path: str,
     chunk_size: int = 1200,
@@ -355,7 +351,6 @@ def ingest_pdf_for_query(
     )
 
 
-@tool
 def query_pdf_chunks(pdf_index: dict, query: str, top_k: int = 5) -> ToolResult:
     """Query an indexed PDF chunk structure using lexical overlap scoring. Input expects pdf_index, query text, and optional top_k. Returns a ToolResult with the best matching chunks or an error."""
     if not isinstance(pdf_index, dict):
@@ -404,13 +399,11 @@ def query_pdf_chunks(pdf_index: dict, query: str, top_k: int = 5) -> ToolResult:
     )
 
 
-@tool("grep_search")
 def grep_search_tool(repo_path: str, term: str) -> ToolResult:
     """Search all Python files under a repo for a text term. Input expects repo_path and term. Returns ToolResult with file, line number, and line matches."""
     return grep_search(repo_path=repo_path, term=term)
 
 
-@tool("read_file")
 def read_file(path: str, max_chars: int = 250_000, start_line: Optional[int] = None, end_line: Optional[int] = None) -> Tuple[bool, str]:
     """Read text from a file, optionally by 1-indexed line range. Input expects path, max_chars, and optional start_line/end_line. Returns a success flag and file content or error string."""
     return _read_text_file(path=path, max_chars=max_chars, start_line=start_line, end_line=end_line)

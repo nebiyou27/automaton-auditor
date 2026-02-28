@@ -287,7 +287,13 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
                         found=False,
                         location=repo_url or "repo_url missing",
                         rationale=clone_res.error or "Clone failed for unknown reasons.",
-                    )
+                    ),
+                    _evidence(
+                        goal="Run blocker: repo evidence unavailable",
+                        found=False,
+                        location=repo_url or "repo_url missing",
+                        rationale="Repository clone failed, so repo-dependent checks cannot execute.",
+                    ),
                 ]
             }
         }
@@ -567,13 +573,30 @@ Reply JSON only: {{"checks": [{{"tool": str, "target": str, "reason": str}}]}}""
             goal=f"LLM investigation plan for: {dim['id']}",
             found=True,
             location="rubric/week2_rubric.json",
-            rationale=f"LLM dynamically selected {len(checks)} checks for this criterion.",
-            content=json.dumps(checks, indent=2),
+            rationale=f"PLAN_ONLY: LLM dynamically selected {len(checks)} checks for this criterion.",
+            content=json.dumps({"plan_only": True, "checks": checks}, indent=2),
             confidence=0.8,
         ))
 
         # Execute each check the LLM selected
         if not repo_path:
+            all_evidences.append(_evidence(
+                goal=f"Dynamic execution skipped: repo unavailable for {dim['id']}",
+                found=False,
+                location="repo bucket",
+                rationale="Repository path was not recovered from clone evidence; cannot execute plan checks.",
+                confidence=1.0,
+            ))
+            continue
+
+        if not checks:
+            all_evidences.append(_evidence(
+                goal=f"Dynamic execution skipped: no checks selected for {dim['id']}",
+                found=False,
+                location="rubric/week2_rubric.json",
+                rationale="LLM produced an empty investigation plan; no executable checks available.",
+                confidence=1.0,
+            ))
             continue
 
         for check in checks:
