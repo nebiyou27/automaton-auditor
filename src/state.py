@@ -109,6 +109,9 @@ class AgentState(TypedDict):
     repo_url: str
     pdf_path: str
     repo_path: NotRequired[str]
+    audit_mode: NotRequired[str]
+    report_path: NotRequired[str]
+    out_path: NotRequired[str]
 
     rubric_path: NotRequired[str]
 

@@ -14,6 +14,13 @@ if not (os.getenv("LANGCHAIN_API_KEY") or "").strip():
 from src.graph import build_graph  # noqa: E402
 
 
+MODE_TO_FOLDER = {
+    "self": "report_onself_generated",
+    "peer": "report_onpeer_generated",
+    "received": "report_bypeer_received",
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Automaton Auditor pipeline.")
     parser.add_argument(
@@ -32,9 +39,15 @@ def parse_args() -> argparse.Namespace:
         help="Path to the rubric JSON file.",
     )
     parser.add_argument(
+        "--mode",
+        choices=["self", "peer", "received"],
+        default="self",
+        help="Audit/report mode for canonical output routing.",
+    )
+    parser.add_argument(
         "--out",
         default="",
-        help="Optional output report path. Defaults to timestamped audit path.",
+        help="Optional extra output report path (canonical mode path is always written).",
     )
     parser.add_argument(
         "--enable-vision",
@@ -66,8 +79,13 @@ def main():
     print(f"- repo: {repo_url}")
     print(f"- pdf: {pdf_path or '(none)'}")
     print(f"- rubric: {rubric_path}")
+    print(f"- mode: {args.mode}")
     print(f"- out: {args.out or '(auto)'}")
     print(f"- enable_vision: {args.enable_vision}")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    canonical_folder = MODE_TO_FOLDER[args.mode]
+    canonical_out = pathlib.Path(f"audit/{canonical_folder}/audit_report_{timestamp}.md")
 
     graph = build_graph()
     result = graph.invoke(
@@ -84,21 +102,23 @@ def main():
             "tool_budget": 9,
             "judge_schema_failures": [],
             "final_report": "",
+            "audit_mode": args.mode,
+            "report_path": str(canonical_out),
         }
     )
 
     print("\n=== FINAL STATE KEYS ===")
     print(result.keys())
+    canonical_out.parent.mkdir(parents=True, exist_ok=True)
+    canonical_out.write_text(result["final_report"], encoding="utf-8")
+    print(f"Canonical report saved to {canonical_out}")
+
     if args.out:
         out = pathlib.Path(args.out)
-    else:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        is_self = "nebiyou27" in repo_url
-        folder = "report_onself_generated" if is_self else "report_onpeer_generated"
-        out = pathlib.Path(f"audit/{folder}/audit_report_{timestamp}.md")
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(result["final_report"], encoding="utf-8")
-    print(f"Report saved to {out}")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(result["final_report"], encoding="utf-8")
+        print(f"Extra report copy saved to {out}")
+
     print("\n=== EVIDENCE BUCKETS ===")
     for k, v in result["evidences"].items():
         print(k, len(v))

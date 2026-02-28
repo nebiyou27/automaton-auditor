@@ -26,33 +26,36 @@ and optional PDF report against a rubric using a Digital Courtroom pattern:
 
 ## Running
 ```powershell
-python main.py --repo <repo_url> --pdf <pdf_path> --rubric <rubric_path>
+python main.py --repo <repo_url> --pdf <pdf_path> --rubric <rubric_path> --mode {self,peer,received}
 ```
 
 **Example — audit a peer's repo with their PDF:**
 ```powershell
-python main.py --repo https://github.com/peer/repo.git --pdf C:\docs\peer_report.pdf --rubric rubric/week2_rubric.json
+python main.py --repo https://github.com/peer/repo.git --pdf C:\docs\peer_report.pdf --rubric rubric/week2_rubric.json --mode peer
 ```
 
 **Example — audit without PDF (PDF analysis skipped):**
 ```powershell
-python main.py --repo https://github.com/nebiyou27/automaton-auditor.git
+python main.py --repo https://github.com/nebiyou27/automaton-auditor.git --mode self
 ```
 
-**Example - custom output path + vision flag:**
+**Example - received report mode + extra output copy + vision flag:**
 ```powershell
-python main.py --repo https://github.com/peer/repo.git --rubric rubric/week2_rubric.json --out audit/report_onpeer_generated/custom_report.md --enable-vision
+python main.py --repo https://github.com/peer/repo.git --rubric rubric/week2_rubric.json --mode received --out audit/custom_report.md --enable-vision
 ```
 
 If arguments are omitted, defaults are used:
 - `--repo`: `https://github.com/nebiyou27/automaton-auditor.git`
 - `--pdf`: empty (routes through `skip_doc_analyst`)
 - `--rubric`: `rubric/week2_rubric.json`
-- `--out`: auto-generated timestamped report path
+- `--mode`: `self`
+- `--out`: optional extra copy path (canonical mode path is always written)
 - `--enable-vision`: parsed as a boolean flag
 
 Reports are written to:
-audit/report_onpeer_generated/audit_report_YYYYMMDD_HHMM.md
+- `--mode self` -> `audit/report_onself_generated/audit_report_YYYYMMDD_HHMM.md`
+- `--mode peer` -> `audit/report_onpeer_generated/audit_report_YYYYMMDD_HHMM.md`
+- `--mode received` -> `audit/report_bypeer_received/audit_report_YYYYMMDD_HHMM.md`
 
 ## Project Structure
 ```text
@@ -101,3 +104,4 @@ automaton-auditor/
 - If `LANGCHAIN_API_KEY` is empty, tracing is automatically disabled in `main.py`
 - VisionInspector requires `pymupdf` — included in `requirements.txt`
 - `tests/` contains a placeholder pending test coverage
+

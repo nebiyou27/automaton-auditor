@@ -13,7 +13,15 @@ from pathlib import Path
 import re
 from typing import Dict, List, Tuple
 
+from src.rubric_ids import CANONICAL_DIMENSION_IDS
 from src.state import AgentState, JudicialOpinion
+
+JUDGE_ORDER = ("Prosecutor", "Defense", "TechLead")
+MODE_TO_FOLDER = {
+    "self": "report_onself_generated",
+    "peer": "report_onpeer_generated",
+    "received": "report_bypeer_received",
+}
 
 
 def _group_by_criterion(opinions: List[JudicialOpinion]) -> Dict[str, List[JudicialOpinion]]:
@@ -293,6 +301,42 @@ def _extract_file_path_from_citation(citation: str) -> str:
     return ""
 
 
+def _collect_dimension_file_refs(
+    criterion_id: str,
+    evidences: Dict[str, List[object]],
+    opinions: List[JudicialOpinion],
+) -> List[str]:
+    refs: List[str] = []
+    for op in opinions:
+        for citation in op.cited_evidence or []:
+            p = _extract_file_path_from_citation(citation)
+            if p and p not in refs:
+                refs.append(p)
+    for items in evidences.values():
+        for ev in items:
+            dim = str(_safe_get(ev, "dimension_id", "") or "").strip()
+            if dim != criterion_id:
+                continue
+            location = str(_safe_get(ev, "location", "") or "").strip()
+            p = _extract_file_path_from_citation(location)
+            if p and p not in refs:
+                refs.append(p)
+    return refs[:5]
+
+
+def _build_dissent_summary(ops: List[JudicialOpinion], variance: int) -> str:
+    if not ops:
+        return "No judge opinions were available."
+    scores = [int(_coerce_score(op.score)) for op in ops]
+    low = min(scores)
+    high = max(scores)
+    if variance <= 1:
+        return f"Low dissent: score spread {low}-{high}."
+    if variance == 2:
+        return f"Moderate dissent: score spread {low}-{high}; arguments show partial disagreement."
+    return f"High dissent: score spread {low}-{high}; deterministic re-evaluation applied."
+
+
 def _recheck_citation(citation: str, evidence_index: Dict[str, List[object]], state: AgentState) -> Tuple[bool, str]:
     if _citation_supported(citation, evidence_index):
         return True, f"`{citation}` found in collected evidence."
@@ -470,9 +514,8 @@ def _resolve_output_markdown_path(state: AgentState) -> Path:
             path = path.with_suffix(".md")
         return path
 
-    repo_url = str(state.get("repo_url", "") or "")
-    is_self = "nebiyou27" in repo_url
-    folder = "report_onself_generated" if is_self else "report_onpeer_generated"
+    mode = str(state.get("audit_mode", "self") or "self").strip().lower()
+    folder = MODE_TO_FOLDER.get(mode, MODE_TO_FOLDER["self"])
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     return Path.cwd() / "audit" / folder / f"chief_justice_report_{stamp}.md"
 
@@ -501,12 +544,33 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
     variance_re_eval_enabled = "variance_re_evaluation" in rules
 
     criterion_sections: List[str] = []
+    dissent_summaries: List[str] = []
     remediation: List[str] = []
     total = 0
     count = 0
     contradiction_count = 0
 
-    for criterion_id, ops in grouped.items():
+    for criterion_id in CANONICAL_DIMENSION_IDS:
+        raw_ops = grouped.get(criterion_id, [])
+        op_by_judge: Dict[str, JudicialOpinion] = {}
+        for op in raw_ops:
+            op_by_judge[op.judge] = op
+
+        ops: List[JudicialOpinion] = []
+        for judge in JUDGE_ORDER:
+            if judge in op_by_judge:
+                ops.append(op_by_judge[judge])
+            else:
+                ops.append(
+                    JudicialOpinion(
+                        judge=judge,  # type: ignore[arg-type]
+                        criterion_id=criterion_id,
+                        score=3,
+                        argument="No opinion generated for this dimension; fallback placeholder inserted.",
+                        cited_evidence=[],
+                    )
+                )
+
         normalized_ops: List[JudicialOpinion] = []
         fact_notes: List[str] = []
         for op in ops:
@@ -518,7 +582,7 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
             fact_notes.extend(notes)
 
         ops = normalized_ops
-        if ops:
+        if raw_ops:
             weighted_resolution = _resolve_weighted_score(
                 criterion_id,
                 ops,
@@ -546,6 +610,7 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
             re_eval_notes.extend(v_notes)
 
         dissent_lines = []
+        judge_blocks: List[str] = []
         for op in ops:
             dissent_lines.append(f"- **{op.judge}** (Score {op.score}/5): {op.argument}")
             if op.cited_evidence:
@@ -555,6 +620,13 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
                 dissent_lines.append(
                     "  - Consistency note: score appears misaligned with argument sentiment."
                 )
+            refs = ", ".join(op.cited_evidence) if op.cited_evidence else "(none)"
+            judge_blocks.append(
+                f"#### {op.judge}\n"
+                f"- Score: {op.score}/5\n"
+                f"- Argument: {op.argument}\n"
+                f"- Cited Evidence: {refs}"
+            )
 
         for note in fact_notes:
             dissent_lines.append(f"- **Fact Supremacy:** {note}")
@@ -580,18 +652,39 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
         total += final_score
         count += 1
 
+        dissent_summary = _build_dissent_summary(ops, variance)
+        dissent_summaries.append(f"- `{criterion_id}`: {dissent_summary}")
+        file_refs = _collect_dimension_file_refs(criterion_id, evidences, ops)
         if final_score < 4:
-            remediation.append(f"- Improve `{criterion_id}` based on cited evidence and deterministic resolution notes.")
+            if file_refs:
+                remediation.append(
+                    f"- `{criterion_id}`: Improve implementation/test evidence in files: "
+                    + ", ".join(f"`{p}`" for p in file_refs)
+                    + "."
+                )
+            else:
+                remediation.append(
+                    f"- `{criterion_id}`: Improve implementation and add file-level evidence citations."
+                )
 
         criterion_sections.append(
-            f"""### Criterion: {criterion_id}
+            f"""### Dimension: {criterion_id}
 **Final Score:** {final_score}/5
 
-**Dissent (Judge Opinions):**
+**Dissent Summary:**
+{dissent_summary}
+
+**Judge Opinions (All Three):**
+{chr(10).join(judge_blocks)}
+
+**Dissent Details:**
 {chr(10).join(dissent_lines) if dissent_lines else "- No opinions."}
 
 **Deterministic Resolution:**
 {reason}
+
+**File-level Remediation Targets:**
+{", ".join(f"`{p}`" for p in file_refs) if file_refs else "(no concrete file references found)"}
 """
         )
 
@@ -611,6 +704,7 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
         executive_extras.append(f"- **Judge Consistency Alerts:** {contradiction_count}")
     if "dissent_requirement" in rules:
         executive_extras.append(f"- **Dissent Requirement:** {rules.get('dissent_requirement')}")
+    executive_extras.append("- **Dimensions Covered:** 10/10 canonical IDs")
 
     fact_supremacy_section = ""
     if "fact_supremacy" in rules:
@@ -619,42 +713,28 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
 - **Fact Supremacy:** {rules.get("fact_supremacy")}
 """
 
-    if incomplete_audit:
-        blocker_lines = "\n".join([f"- {b}" for b in blockers])
-        return f"""# AUTOMATON AUDITOR - FINAL VERDICT
-
-## Executive Summary
-- **Repository:** {state.get("repo_url", "N/A")}
-- **PDF:** {state.get("pdf_path", "N/A") or "None"}
-- **Overall Score:** N/A (incomplete audit)
-- **Evidence Coverage:**
-{chr(10).join(evidence_summary) if evidence_summary else "- No evidence collected."}
-{chr(10).join(executive_extras) if executive_extras else ""}
-
-## Blocking Issues
-{blocker_lines}
-
-## Remediation Plan
-- Resolve blocking issues above, rerun detectives, then regenerate judicial verdict.
-{fact_supremacy_section}
-"""
-
-    # FIXED: C11a
+    blocker_lines = "\n".join([f"- {b}" for b in blockers]) if blockers else "- None detected."
     return f"""# AUTOMATON AUDITOR - FINAL VERDICT
 
 ## Executive Summary
 - **Repository:** {state.get("repo_url", "N/A")}
 - **PDF:** {state.get("pdf_path", "N/A") or "None"}
-- **Overall Score:** {avg}/5
+- **Overall Score:** {"N/A (incomplete audit)" if incomplete_audit else f"{avg}/5"}
 - **Evidence Coverage:**
 {chr(10).join(evidence_summary) if evidence_summary else "- No evidence collected."}
 {chr(10).join(executive_extras) if executive_extras else ""}
 
-## Criterion Breakdown
+## Per-Dimension Breakdown (All 10 Rubric IDs)
 {chr(10).join(criterion_sections)}
 
-## Remediation Plan
+## Dissent Summaries
+{chr(10).join(dissent_summaries) if dissent_summaries else "- No dissent summaries available."}
+
+## File-Level Remediation Plan
 {chr(10).join(remediation)}
+
+## Blocking Issues
+{blocker_lines}
 {fact_supremacy_section}
 """
 
