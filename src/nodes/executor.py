@@ -275,6 +275,8 @@ def executor_node(state: AgentState) -> Dict[str, object]:
     active_pdf_index = state.get("pdf_index") if isinstance(state.get("pdf_index"), dict) else None
     evidences: List[Evidence] = []
     runs: List[ToolRunMetadata] = []
+    fatal_error_type = ""
+    fatal_error_message = ""
 
     tool_map = {
         "clone": lambda c: _tool_clone(state, c),
@@ -296,9 +298,15 @@ def executor_node(state: AgentState) -> Dict[str, object]:
         if handler is None:
             result = _tool_result(False, error=f"Tool not allowed: {call.tool_name}")
         else:
-            result = handler(call)
-            if call.tool_name == "pdf_ingest" and result.ok:
-                active_pdf_index = result.data or active_pdf_index
+            try:
+                result = handler(call)
+                if call.tool_name == "pdf_ingest" and result.ok:
+                    active_pdf_index = result.data or active_pdf_index
+            except Exception as e:
+                result = _tool_result(False, error=f"Unhandled executor exception: {e!r}")
+                if not fatal_error_type:
+                    fatal_error_type = "executor_exception"
+                    fatal_error_message = str(result.error or "")
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         output_payload = result.data if result.ok else {"error": result.error}
@@ -311,10 +319,18 @@ def executor_node(state: AgentState) -> Dict[str, object]:
             )
         )
         evidences.append(_tool_to_evidence(call, result))
+        if (not result.ok) and (not fatal_error_type):
+            err = str(result.error or "")
+            if ("git clone" in err.lower()) or ("clone" in call.tool_name.lower()):
+                fatal_error_type = "clone_failure"
+                fatal_error_message = err
 
     out: Dict[str, object] = {
         "evidences": {"executor": evidences},
         "tool_runs": runs,
+        "error_type": fatal_error_type,
+        "error_message": fatal_error_message,
+        "failed_node": "executor" if fatal_error_type else "",
     }
     if isinstance(active_pdf_index, dict):
         out["pdf_index"] = active_pdf_index

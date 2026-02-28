@@ -133,5 +133,8 @@ class AgentState(TypedDict):
     iteration: NotRequired[int]
     max_iters: NotRequired[int]
     tool_budget: NotRequired[int]
+    error_type: NotRequired[str]
+    error_message: NotRequired[str]
+    failed_node: NotRequired[str]
 
     final_report: str

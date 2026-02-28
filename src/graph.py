@@ -18,6 +18,7 @@ from src.nodes.detectives import (
     vision_inspector_node,
 )
 from src.nodes.aggregator import evidence_aggregator
+from src.nodes.error_handler import error_handler_node
 from src.nodes.planner import planner_node
 from src.nodes.executor import executor_node
 from src.nodes.reflector import judge_gate_node, reflector_node
@@ -42,6 +43,20 @@ def _route_reflector(state: AgentState) -> Literal["planner", "judge_gate"]:
         return "planner"
     stop = bool(stop_decision.get("stop", False) if isinstance(stop_decision, dict) else getattr(stop_decision, "stop", False))
     return "judge_gate" if stop else "planner"
+
+
+def _route_planner(state: AgentState) -> Literal["executor", "error_handler"]:
+    error_type = (state.get("error_type") or "").strip()
+    if error_type == "missing_rubric":
+        return "error_handler"
+    return "executor"
+
+
+def _route_executor(state: AgentState) -> Literal["reflector", "error_handler"]:
+    error_type = (state.get("error_type") or "").strip()
+    if error_type in {"clone_failure", "executor_exception"}:
+        return "error_handler"
+    return "reflector"
 
 
 def build_graph():
@@ -71,6 +86,7 @@ def build_graph():
     builder.add_node("executor", executor_node)
     builder.add_node("reflector", reflector_node)
     builder.add_node("judge_gate", judge_gate_node)
+    builder.add_node("error_handler", error_handler_node)
 
     # Judicial bench
     builder.add_node("prosecutor", prosecutor_judge)
@@ -101,8 +117,22 @@ def build_graph():
 
     # ── Judicial fan-out ──────────────────────────────────────────────────────
     builder.add_edge("evidence_aggregator", "planner")
-    builder.add_edge("planner", "executor")
-    builder.add_edge("executor", "reflector")
+    builder.add_conditional_edges(
+        "planner",
+        _route_planner,
+        {
+            "executor": "executor",
+            "error_handler": "error_handler",
+        },
+    )
+    builder.add_conditional_edges(
+        "executor",
+        _route_executor,
+        {
+            "reflector": "reflector",
+            "error_handler": "error_handler",
+        },
+    )
     builder.add_conditional_edges(
         "reflector",
         _route_reflector,
@@ -121,6 +151,7 @@ def build_graph():
     builder.add_edge("techlead", "chief_justice")
 
     # ── End ───────────────────────────────────────────────────────────────────
+    builder.add_edge("error_handler", END)
     builder.add_edge("chief_justice", END)
 
     return builder.compile()

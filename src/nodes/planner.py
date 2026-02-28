@@ -16,18 +16,23 @@ def _to_text(value: object) -> str:
     return str(value)
 
 
-def _load_rubric(state: AgentState) -> dict:
+def _load_rubric(state: AgentState) -> tuple[dict, str | None]:
     rubric_path = (state.get("rubric_path") or "rubric/week2_rubric.json").strip()
     if not os.path.isabs(rubric_path):
         rubric_path = os.path.join(os.getcwd(), rubric_path)
     if not os.path.exists(rubric_path):
-        return {"dimensions": []}
+        return {"dimensions": []}, f"Rubric file not found: {rubric_path}"
     try:
         with open(rubric_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {"dimensions": []}
-    except Exception:
-        return {"dimensions": []}
+        if not isinstance(data, dict):
+            return {"dimensions": []}, "Rubric JSON root must be an object."
+        dims = data.get("dimensions", [])
+        if not isinstance(dims, list):
+            return {"dimensions": []}, "Rubric dimensions must be a list."
+        return data, None
+    except Exception as e:
+        return {"dimensions": []}, f"Rubric JSON parse error: {e!r}"
 
 
 def _flatten_evidence(state: AgentState) -> List[Tuple[str, object]]:
@@ -119,7 +124,15 @@ def _is_found(ev: object) -> bool:
 
 
 def planner_node(state: AgentState) -> Dict[str, object]:
-    rubric = _load_rubric(state)
+    rubric, rubric_err = _load_rubric(state)
+    if rubric_err:
+        return {
+            "planned_tool_calls": [],
+            "error_type": "missing_rubric",
+            "error_message": rubric_err,
+            "failed_node": "planner",
+        }
+
     dimensions = rubric.get("dimensions", [])
     if not isinstance(dimensions, list):
         dimensions = []
@@ -179,4 +192,7 @@ def planner_node(state: AgentState) -> Dict[str, object]:
 
     return {
         "planned_tool_calls": planned_calls[:3],
+        "error_type": "",
+        "error_message": "",
+        "failed_node": "",
     }
