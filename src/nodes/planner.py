@@ -5,7 +5,7 @@ import os
 import re
 from typing import Dict, List, Tuple
 
-from src.state import AgentState, StopDecision, ToolCall
+from src.state import AgentState, ToolCall
 
 
 def _to_text(value: object) -> str:
@@ -118,18 +118,6 @@ def _is_found(ev: object) -> bool:
     return bool(getattr(ev, "found", False))
 
 
-def _summarize_coverage(state: AgentState) -> Dict[str, Dict[str, int]]:
-    evidences = state.get("evidences", {}) or {}
-    summary: Dict[str, Dict[str, int]] = {}
-    for bucket, items in evidences.items():
-        if not isinstance(items, list):
-            continue
-        total = len(items)
-        found = sum(1 for ev in items if _is_found(ev))
-        summary[str(bucket)] = {"found": found, "total": total}
-    return summary
-
-
 def planner_node(state: AgentState) -> Dict[str, object]:
     rubric = _load_rubric(state)
     dimensions = rubric.get("dimensions", [])
@@ -189,27 +177,6 @@ def planner_node(state: AgentState) -> Dict[str, object]:
             )
         )
 
-    remaining_risks: List[str] = [reason for risk, _, reason in ranked if risk >= 40]
-    stop = len(planned_calls) == 0
-    if stop:
-        decision_reason = "Current evidence appears sufficient across rubric dimensions."
-    else:
-        decision_reason = f"Additional evidence needed for {len(remaining_risks) or len(planned_calls)} dimensions."
-
-    coverage = _summarize_coverage(state)
-    coverage_line = ", ".join(
-        [f"{bucket}:{vals['found']}/{vals['total']}" for bucket, vals in coverage.items()]
-    )
-    if coverage_line:
-        decision_reason = f"{decision_reason} Coverage={coverage_line}."
-
-    stop_decision = StopDecision(
-        stop=stop,
-        reason=decision_reason,
-        remaining_risks=remaining_risks[:10],
-    )
-
     return {
         "planned_tool_calls": planned_calls[:3],
-        "stop_decision": stop_decision,
     }

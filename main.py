@@ -79,6 +79,9 @@ def main():
             "evidences": {},
             "opinions": [],
             "tool_runs": [],
+            "iteration": 0,
+            "max_iters": 3,
+            "tool_budget": 9,
             "final_report": "",
         }
     )

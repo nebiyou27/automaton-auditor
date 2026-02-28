@@ -2,7 +2,7 @@
 # ============
 # Full graph orchestration:
 #   Fan-Out detectives -> Fan-In evidence aggregator ->
-#   Planner -> Executor -> Fan-Out judges -> Fan-In Chief Justice -> END
+#   Planner -> Executor -> Reflector -> (loop or judges) -> Chief Justice -> END
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from src.nodes.detectives import (
 from src.nodes.aggregator import evidence_aggregator
 from src.nodes.planner import planner_node
 from src.nodes.executor import executor_node
+from src.nodes.reflector import judge_gate_node, reflector_node
 from src.nodes.skip import skip_doc_analyst
 from src.nodes.judges import prosecutor_judge, defense_judge, techlead_judge
 from src.nodes.justice import chief_justice
@@ -35,15 +36,24 @@ def _route_doc_analyst(state: AgentState) -> Literal["doc_analyst", "skip_doc_an
     return "doc_analyst" if pdf_path else "skip_doc_analyst"
 
 
+def _route_reflector(state: AgentState) -> Literal["planner", "judge_gate"]:
+    stop_decision = state.get("stop_decision")
+    if stop_decision is None:
+        return "planner"
+    stop = bool(stop_decision.get("stop", False) if isinstance(stop_decision, dict) else getattr(stop_decision, "stop", False))
+    return "judge_gate" if stop else "planner"
+
+
 def build_graph():
     """
     Digital Courtroom graph:
     1) Detectives run in parallel (fan-out)
     2) EvidenceAggregator synchronizes (fan-in)
-    3) Planner proposes next 1-3 tool calls + stop decision
+    3) Planner proposes next 1-3 tool calls
     4) Executor runs selected tools and records results
-    5) Judges run in parallel (fan-out)
-    6) Chief Justice synthesizes deterministically (fan-in)
+    5) Reflector scores coverage/confidence + deterministic stop rules
+    6) Judges run in parallel (fan-out) after stop conditions are met
+    7) Chief Justice synthesizes deterministically (fan-in)
     """
     builder = StateGraph(AgentState)
 
@@ -59,6 +69,8 @@ def build_graph():
     builder.add_node("evidence_aggregator", evidence_aggregator)
     builder.add_node("planner", planner_node)
     builder.add_node("executor", executor_node)
+    builder.add_node("reflector", reflector_node)
+    builder.add_node("judge_gate", judge_gate_node)
 
     # Judicial bench
     builder.add_node("prosecutor", prosecutor_judge)
@@ -90,9 +102,18 @@ def build_graph():
     # ── Judicial fan-out ──────────────────────────────────────────────────────
     builder.add_edge("evidence_aggregator", "planner")
     builder.add_edge("planner", "executor")
-    builder.add_edge("executor", "prosecutor")
-    builder.add_edge("executor", "defense")
-    builder.add_edge("executor", "techlead")
+    builder.add_edge("executor", "reflector")
+    builder.add_conditional_edges(
+        "reflector",
+        _route_reflector,
+        {
+            "planner": "planner",
+            "judge_gate": "judge_gate",
+        },
+    )
+    builder.add_edge("judge_gate", "prosecutor")
+    builder.add_edge("judge_gate", "defense")
+    builder.add_edge("judge_gate", "techlead")
 
     # ── Judicial fan-in to Chief Justice ──────────────────────────────────────
     builder.add_edge("prosecutor", "chief_justice")
@@ -119,6 +140,9 @@ if __name__ == "__main__":
         "evidences": {},
         "opinions": [],
         "tool_runs": [],
+        "iteration": 0,
+        "max_iters": 3,
+        "tool_budget": 9,
         "final_report": "",
     }
 

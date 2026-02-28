@@ -84,6 +84,20 @@ class ToolRunMetadata(BaseModel):
     output_size: int = Field(ge=0, description="Approx output size in characters.")
 
 
+class DimensionReflection(BaseModel):
+    """
+    Reflective scoring status for one rubric dimension.
+    """
+    dimension_id: str = Field(description="Rubric dimension id.")
+    applicable: bool = Field(description="Whether this dimension is applicable for current inputs.")
+    coverage: float = Field(ge=0.0, le=1.0, description="Evidence coverage score in [0,1].")
+    confidence: float = Field(ge=0.0, le=1.0, description="Evidence confidence score in [0,1].")
+    missing_questions: List[str] = Field(
+        default_factory=list,
+        description="Unresolved forensic checks/questions."
+    )
+
+
 class AgentState(TypedDict):
     """
     Shared state container passed between LangGraph nodes.
@@ -115,5 +129,9 @@ class AgentState(TypedDict):
         operator.add
     ]
     pdf_index: NotRequired[Dict[str, Any]]
+    reflections: NotRequired[List[DimensionReflection]]
+    iteration: NotRequired[int]
+    max_iters: NotRequired[int]
+    tool_budget: NotRequired[int]
 
     final_report: str
