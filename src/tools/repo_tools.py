@@ -29,7 +29,6 @@ class ToolResult:
 # Git / Repo Tools (Sandboxed)
 # -------------------------------------------------------------------------------
 
-@tool
 def clone_repo_sandboxed(
     repo_url: str,
     timeout_s: int = 90,
@@ -80,7 +79,6 @@ def clone_repo_sandboxed(
         return ToolResult(ok=False, error=f"Unexpected error during clone: {e!r}")
 
 
-@tool
 def extract_git_history(repo_path: str, max_commits: int = 200) -> ToolResult:
     """Extract chronological commit history with hash, message, and timestamp from a local Git repo. Input expects repo_path and optional max_commits. Returns a ToolResult containing commit records or an error."""
     if not repo_path or not os.path.isdir(repo_path):
