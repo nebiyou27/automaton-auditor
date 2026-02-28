@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -36,6 +37,7 @@ def _evidence(
     rationale: str,
     content: str | None = None,
     confidence: float = 1.0,
+    dimension_id: str = "",
 ) -> Evidence:
     return Evidence(
         goal=goal,
@@ -44,6 +46,7 @@ def _evidence(
         rationale=rationale,
         content=content,
         confidence=confidence,
+        dimension_id=dimension_id,
     )
 
 
@@ -79,6 +82,169 @@ def _read_text_file(path: str, max_chars: int = 2000) -> tuple[bool, str]:
             return True, f.read(max_chars)
     except Exception as e:
         return False, f"Read failed: {e!r}"
+
+
+def _parse_git_date(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S %z")
+    except Exception:
+        return None
+
+
+def _classify_git_progression(commits: List[Dict[str, str]]) -> Dict[str, object]:
+    count = len(commits)
+    if count == 0:
+        return {
+            "commit_count": 0,
+            "progression_story": False,
+            "init_only": False,
+            "bulk_upload_suspected": False,
+            "timestamps_clustered_minutes": None,
+            "timestamps_clustered": False,
+            "phase_hit_count": 0,
+            "phase_hit_indices": {"setup": None, "tool_engineering": None, "graph_orchestration": None},
+            "classification": "mixed",
+            "phase_hits": {"setup": False, "tool_engineering": False, "graph_orchestration": False},
+        }
+
+    messages = [str(c.get("message", "") or "").lower() for c in commits]
+    dates = [_parse_git_date(str(c.get("date", "") or "")) for c in commits]
+    valid_dates = [d for d in dates if d is not None]
+
+    setup_kw = ("setup", "environment", "env", "bootstrap", "requirements", "dependency", "venv")
+    tool_kw = ("tool", "tools", "ast", "pdf", "repo", "executor", "planner", "detective")
+    graph_kw = ("graph", "langgraph", "orchestration", "stategraph", "judge", "justice", "reflector")
+
+    def _first_idx(keywords: tuple[str, ...]) -> int | None:
+        for i, msg in enumerate(messages):
+            if any(k in msg for k in keywords):
+                return i
+        return None
+
+    idx_setup = _first_idx(setup_kw)
+    idx_tool = _first_idx(tool_kw)
+    idx_graph = _first_idx(graph_kw)
+
+    phase_hits = {
+        "setup": idx_setup is not None,
+        "tool_engineering": idx_tool is not None,
+        "graph_orchestration": idx_graph is not None,
+    }
+    progression_story = (
+        idx_setup is not None
+        and idx_tool is not None
+        and idx_graph is not None
+        and idx_setup < idx_tool < idx_graph
+    )
+
+    init_only = count == 1 and any(t in messages[0] for t in ("init", "initial", "first commit"))
+    has_bulk_word = any(("bulk" in m) or ("upload" in m) for m in messages)
+    clustered_minutes = None
+    clustered = False
+    if len(valid_dates) >= 2:
+        span_s = (max(valid_dates) - min(valid_dates)).total_seconds()
+        clustered_minutes = round(span_s / 60.0, 2)
+        clustered = span_s <= 10 * 60
+    bulk_upload_suspected = bool(has_bulk_word or init_only or (clustered and count <= 3))
+    phase_hit_count = sum(1 for v in phase_hits.values() if v)
+    if init_only:
+        classification = "init_only"
+    elif progression_story and not bulk_upload_suspected:
+        classification = "progressive_build"
+    elif bulk_upload_suspected and not progression_story:
+        classification = "bulk_upload"
+    else:
+        classification = "mixed"
+
+    return {
+        "commit_count": count,
+        "progression_story": progression_story,
+        "init_only": init_only,
+        "bulk_upload_suspected": bulk_upload_suspected,
+        "timestamps_clustered_minutes": clustered_minutes,
+        "timestamps_clustered": clustered,
+        "phase_hit_count": phase_hit_count,
+        "phase_hit_indices": {"setup": idx_setup, "tool_engineering": idx_tool, "graph_orchestration": idx_graph},
+        "classification": classification,
+        "phase_hits": phase_hits,
+    }
+
+
+def _git_confidence(classifier: Dict[str, object]) -> float:
+    count = int(classifier.get("commit_count", 0) or 0)
+    phase_hits = int(classifier.get("phase_hit_count", 0) or 0)
+    clustered = bool(classifier.get("timestamps_clustered", False))
+    classification = str(classifier.get("classification", "mixed"))
+
+    if count >= 4 and phase_hits >= 2 and not clustered:
+        return 0.93
+    if classification == "init_only" or clustered or phase_hits <= 1:
+        return 0.62
+    return 0.80
+
+
+def _fmt_commit(c: Dict[str, str]) -> str:
+    return f"{c.get('hash', '')} {c.get('message', '')} ({c.get('date', '')})".strip()
+
+
+def _select_representative_commits(commits: List[Dict[str, str]], classifier: Dict[str, object]) -> List[Dict[str, str]]:
+    if not commits:
+        return []
+
+    idxs: List[int] = [0, len(commits) - 1]
+    phase_idx = classifier.get("phase_hit_indices", {})
+    if isinstance(phase_idx, dict):
+        for k in ("setup", "tool_engineering", "graph_orchestration"):
+            v = phase_idx.get(k)
+            if isinstance(v, int):
+                idxs.append(v)
+
+    # Optional 4th phase-like anchor: first explicit bulk/upload marker if present.
+    for i, c in enumerate(commits):
+        msg = str(c.get("message", "")).lower()
+        if "bulk" in msg or "upload" in msg:
+            idxs.append(i)
+            break
+
+    unique_sorted = sorted({i for i in idxs if 0 <= i < len(commits)})
+    reps = [commits[i] for i in unique_sorted]
+
+    # Ensure 3+ representatives when possible.
+    if len(reps) < 3 and len(commits) >= 3:
+        mid = len(commits) // 2
+        for i in (mid, max(1, mid - 1), min(len(commits) - 2, mid + 1)):
+            if commits[i] not in reps:
+                reps.append(commits[i])
+            if len(reps) >= 3:
+                break
+
+    return reps[:6]
+
+
+def _build_git_forensic_summary(commits: List[Dict[str, str]], classifier: Dict[str, object]) -> Dict[str, object]:
+    count = int(classifier.get("commit_count", 0) or 0)
+    first = commits[0].get("hash", "") if commits else ""
+    last = commits[-1].get("hash", "") if commits else ""
+    phase_hits = int(classifier.get("phase_hit_count", 0) or 0)
+    clustered = bool(classifier.get("timestamps_clustered", False))
+    label = str(classifier.get("classification", "mixed"))
+    reps = _select_representative_commits(commits, classifier)
+    reps_txt = "; ".join(_fmt_commit(c) for c in reps[:6]) if reps else "none"
+
+    rationale = (
+        f"Git progression classification: {label} "
+        f"(commit_count={count}, phase_hits={phase_hits}, timestamps_clustered={'yes' if clustered else 'no'}). "
+        f"Representative commits: {reps_txt}"
+    )
+    location = f"git log --oneline --reverse (first={first or 'none'} last={last or 'none'}, count={count})"
+    confidence = _git_confidence(classifier)
+    return {
+        "classification": label,
+        "rationale": rationale,
+        "location": location,
+        "confidence": confidence,
+        "representative_commits": reps,
+    }
 
 
 REQUIRED_CHECKS_BY_CRITERION: Dict[str, List[Dict[str, str]]] = {
@@ -168,8 +334,28 @@ def _execute_tool_check(tool_name: str, target: str, repo_path: str) -> Tuple[bo
     elif tool_name == "git_log":
         res = extract_git_history(repo_path)
         found = res.ok
-        result = str(res.data)[:500] if res.ok else str(res.error)
-        location = ".git/log"
+        commits: List[Dict[str, str]] = []
+        if res.ok:
+            commits = list((res.data or {}).get("commits", []))
+            classifier = _classify_git_progression(commits)
+            summary = _build_git_forensic_summary(commits, classifier)
+            result = json.dumps(
+                {
+                    "git_history": {
+                        "count": (res.data or {}).get("count", 0),
+                        "empty_repo": (res.data or {}).get("empty_repo", False),
+                        "commits_preview": commits[:10]
+                    },
+                    "git_progression_classifier": classifier,
+                    "git_forensic_summary": summary,
+                }
+            )[:1200]
+        else:
+            result = str(res.error)
+        if commits:
+            location = f"git log --oneline --reverse (first={commits[0].get('hash','')} last={commits[-1].get('hash','')}, count={len(commits)})"
+        else:
+            location = "git log --oneline --reverse (first=none last=none, count=0)"
 
     else:
         result = f"Unsupported tool: {tool_name}"
@@ -222,14 +408,30 @@ def _run_dynamic_plan_checks(state: AgentState, repo_path: str, dimensions: List
                 result = f"Execution error: {e!r}"
                 location = target or repo_path
 
+            rationale_text = reason
+            content_text = str(result)[:500] if result else None
+            confidence_value = 0.9
+            if tool_name == "git_log" and found and result:
+                try:
+                    parsed = json.loads(str(result))
+                    gsum = parsed.get("git_forensic_summary", {})
+                    if isinstance(gsum, dict):
+                        rationale_text = str(gsum.get("rationale", rationale_text))
+                        location = str(gsum.get("location", location))
+                        confidence_value = float(gsum.get("confidence", confidence_value))
+                    content_text = json.dumps(parsed)[:1200]
+                except Exception:
+                    pass
+
             all_evidences.append(
                 _evidence(
                     goal=f"Required check [{dim_id}]: {tool_name} on '{target}'",
                     found=found,
                     location=location,
-                    rationale=reason,
-                    content=str(result)[:500] if result else None,
-                    confidence=0.9,
+                    rationale=rationale_text,
+                    content=content_text,
+                    confidence=confidence_value,
+                    dimension_id=dim_id if tool_name == "git_log" else "",
                 )
             )
 
@@ -294,14 +496,30 @@ Reply JSON only: {{"checks": [{{"tool": str, "target": str, "reason": str}}]}}""
                 found = False
                 result = f"Execution error: {e!r}"
 
+            rationale_text = reason
+            content_text = str(result)[:500] if result else None
+            confidence_value = 0.75
+            if tool_name == "git_log" and found and result:
+                try:
+                    parsed = json.loads(str(result))
+                    gsum = parsed.get("git_forensic_summary", {})
+                    if isinstance(gsum, dict):
+                        rationale_text = str(gsum.get("rationale", rationale_text))
+                        location = str(gsum.get("location", location))
+                        confidence_value = float(gsum.get("confidence", confidence_value))
+                    content_text = json.dumps(parsed)[:1200]
+                except Exception:
+                    pass
+
             all_evidences.append(
                 _evidence(
                     goal=f"Dynamic check [{dim_id}]: {tool_name} on '{target}'",
                     found=found,
                     location=location,
-                    rationale=reason,
-                    content=str(result)[:500] if result else None,
-                    confidence=0.75,
+                    rationale=rationale_text,
+                    content=content_text,
+                    confidence=confidence_value,
+                    dimension_id=dim_id if tool_name == "git_log" else "",
                 )
             )
 
@@ -387,14 +605,24 @@ def repo_investigator(state: AgentState) -> Dict[str, object]:
         else:
             count = int(hist_res.data.get("count", 0))
             commits = hist_res.data.get("commits", [])
-            preview = "\n".join([f"{c['hash']} {c['message']}" for c in commits[:10]])
+            classifier = _classify_git_progression(commits)
+            summary = _build_git_forensic_summary(commits, classifier)
             evidences.append(
                 _evidence(
                     goal="Extract git history (commit list)",
                     found=True,
-                    location=".git/log",
-                    rationale=f"git log extracted successfully. commit_count={count}.",
-                    content=preview or "(no commits found)",
+                    location=str(summary["location"]),
+                    rationale=str(summary["rationale"]),
+                    content=json.dumps(
+                        {
+                            "commit_count": count,
+                            "commits_preview": commits[:10],
+                            "git_progression_classifier": classifier,
+                            "git_forensic_summary": summary,
+                        }
+                    )[:1400],
+                    confidence=float(summary["confidence"]),
+                    dimension_id="git_forensic_analysis",
                 )
             )
 
