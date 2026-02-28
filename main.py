@@ -78,6 +78,7 @@ def main():
             "rubric_path": rubric_path,
             "evidences": {},
             "opinions": [],
+            "tool_runs": [],
             "final_report": "",
         }
     )

@@ -80,22 +80,22 @@ def _choose_tool_for_dimension(dimension: dict, seen_tools: set[str]) -> Tuple[s
     if "git log" in instruction or "commit" in instruction:
         return "git_log", {}, "Extract commit progression and timestamp evidence."
 
-    if ("stategraph" in instruction or "add_edge" in instruction or "ast" in instruction) and "ast_parse" not in seen_tools:
+    if ("stategraph" in instruction or "add_edge" in instruction or "ast" in instruction) and "ast_scan" not in seen_tools:
         path = "src/graph.py"
         for p in paths:
             if p.endswith(".py"):
                 path = p
                 break
-        return "ast_parse", {"path": path}, "Parse graph/state structure to verify orchestration claims."
+        return "ast_scan", {"path": path}, "Parse graph/state structure to verify orchestration claims."
 
     if "typeddict" in instruction or "basemodel" in instruction or "operator.add" in instruction:
-        return "ast_parse", {"path": "src/state.py"}, "Validate typed state and reducer wiring."
+        return "ast_scan", {"path": "src/state.py"}, "Validate typed state and reducer wiring."
 
     if "pdf" in instruction and ("image" in instruction or "diagram" in instruction):
         return (
-            "extract_images_from_pdf",
+            "vision_analyze",
             {"pdf_path": "$state.pdf_path"},
-            "Extract report visuals for architecture-diagram verification.",
+            "Analyze report visuals for architecture-diagram verification.",
         )
 
     if "pdf" in instruction:
@@ -104,14 +104,12 @@ def _choose_tool_for_dimension(dimension: dict, seen_tools: set[str]) -> Tuple[s
             if key.lower() in instruction:
                 terms.append(key)
         query = terms[0] if terms else dim_id.replace("_", " ")
-        return "query_pdf_chunks", {"query": query, "top_k": 3}, "Retrieve report text evidence for claimed concepts."
+        return "pdf_query", {"query": query, "top_k": 3}, "Retrieve report text evidence for claimed concepts."
 
     if paths:
-        if "check_file_exists" not in seen_tools:
-            return "check_file_exists", {"path": paths[0]}, "Verify claimed file exists before deeper checks."
-        return "read_file", {"path": paths[0], "chars": 2200}, "Read cited file to validate implementation details."
+        return "ast_scan", {"path": paths[0]}, "Parse cited file structure for implementation verification."
 
-    return "grep_search", {"term": dim_id.replace("_", " ")}, "Search codebase for rubric-specific implementation evidence."
+    return "clone", {}, "Clone sandboxed target repo to enable additional forensic checks."
 
 
 def _is_found(ev: object) -> bool:

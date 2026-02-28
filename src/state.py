@@ -22,6 +22,10 @@ class Evidence(BaseModel):
         ge=0.0, le=1.0,
         description="Confidence score from 0.0 to 1.0."
     )
+    dimension_id: str = Field(
+        default="",
+        description="Rubric dimension id this evidence supports."
+    )
 
 
 class JudicialOpinion(BaseModel):
@@ -70,6 +74,16 @@ class StopDecision(BaseModel):
     )
 
 
+class ToolRunMetadata(BaseModel):
+    """
+    Execution metadata for one dispatched tool call.
+    """
+    dimension_id: str = Field(description="Rubric dimension id for this run.")
+    tool_name: str = Field(description="Executed tool name.")
+    elapsed_ms: int = Field(ge=0, description="Elapsed runtime in milliseconds.")
+    output_size: int = Field(ge=0, description="Approx output size in characters.")
+
+
 class AgentState(TypedDict):
     """
     Shared state container passed between LangGraph nodes.
@@ -96,5 +110,10 @@ class AgentState(TypedDict):
 
     planned_tool_calls: NotRequired[List[ToolCall]]
     stop_decision: NotRequired[StopDecision]
+    tool_runs: Annotated[
+        List[ToolRunMetadata],
+        operator.add
+    ]
+    pdf_index: NotRequired[Dict[str, Any]]
 
     final_report: str
