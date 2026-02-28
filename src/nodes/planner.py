@@ -189,6 +189,8 @@ def planner_node(state: AgentState) -> Dict[str, object]:
     ranked: List[Tuple[int, dict, str]] = []
     validation: List[Evidence] = []
     has_pdf = bool((state.get("pdf_path") or "").strip())
+    vision_enabled = bool(state.get("enable_vision", False))
+    can_run_vision = has_pdf and vision_enabled
 
     for idx, dim in enumerate(dimensions):
         if not isinstance(dim, dict):
@@ -249,6 +251,26 @@ def planner_node(state: AgentState) -> Dict[str, object]:
                     True,
                     "Dimension marked not applicable for this run because pdf_path is empty.",
                     f"id={dim_id}, target_artifact={target_artifact or 'n/a'}",
+                )
+            )
+            continue
+        if dim_id == "swarm_visual" and not can_run_vision:
+            validation.append(
+                _validation_evidence(
+                    dim_id,
+                    True,
+                    "Dimension marked not applicable for this run because vision is disabled or pdf_path is empty.",
+                    f"id={dim_id}, enable_vision={vision_enabled}, has_pdf={has_pdf}",
+                )
+            )
+            continue
+        if target_artifact == "pdf_images" and not can_run_vision:
+            validation.append(
+                _validation_evidence(
+                    dim_id,
+                    True,
+                    "Dimension marked not applicable for this run because vision is disabled or pdf_path is empty.",
+                    f"id={dim_id}, target_artifact={target_artifact}, enable_vision={vision_enabled}, has_pdf={has_pdf}",
                 )
             )
             continue

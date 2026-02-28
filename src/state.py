@@ -114,6 +114,7 @@ class AgentState(TypedDict):
     """
     repo_url: str
     pdf_path: str
+    enable_vision: NotRequired[bool]
     repo_path: NotRequired[str]
     audit_mode: NotRequired[str]
     report_path: NotRequired[str]

@@ -16,3 +16,11 @@ def skip_doc_analyst(state: AgentState) -> Dict[str, object]:
     so aggregator doesn't run early when doc_analyst is skipped.
     """
     return {}
+
+
+def skip_vision_inspector(state: AgentState) -> Dict[str, object]:
+    """
+    No-op node.
+    Exists only to preserve graph structure when vision is disabled or unavailable.
+    """
+    return {}

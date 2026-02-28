@@ -113,6 +113,9 @@ def _is_applicable(dim: dict, pdf_path: str) -> bool:
     dim_id = _to_text(dim.get("id", "")).strip()
     if dim_id in PDF_ONLY_DIMENSIONS and not pdf_path:
         return False
+    enable_vision = bool(dim.get("_enable_vision", False))
+    if dim_id == "swarm_visual" and (not enable_vision or not pdf_path):
+        return False
     return True
 
 
@@ -136,6 +139,8 @@ def _collect_related_for_dimension(state: AgentState, dim: dict) -> Tuple[List[o
 
 def _score_dimension(state: AgentState, dim: dict, pdf_path: str) -> DimensionReflection:
     dim_id = _to_text(dim.get("id", "")).strip()
+    dim = dict(dim)
+    dim["_enable_vision"] = bool(state.get("enable_vision", False))
     applicable = _is_applicable(dim, pdf_path)
     if not applicable:
         return DimensionReflection(

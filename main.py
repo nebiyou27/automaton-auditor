@@ -132,6 +132,7 @@ def main():
             "repo_url": repo_url,
             "pdf_path": pdf_path,
             "repo_path": "",
+            "enable_vision": args.enable_vision,
             "rubric_path": rubric_path,
             "evidences": {},
             "opinions": [],

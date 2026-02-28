@@ -23,7 +23,7 @@ from src.nodes.judge_repair import judge_repair_node
 from src.nodes.planner import planner_node
 from src.nodes.executor import executor_node
 from src.nodes.reflector import judge_gate_node, reflector_node
-from src.nodes.skip import skip_doc_analyst
+from src.nodes.skip import skip_doc_analyst, skip_vision_inspector
 from src.nodes.judges import defense_judge, judge_barrier_node, prosecutor_judge, techlead_judge
 from src.nodes.justice import chief_justice
 
@@ -47,6 +47,12 @@ def _route_reflector(state: AgentState) -> Literal["planner", "judge_gate", "err
         return "planner"
     stop = bool(stop_decision.get("stop", False) if isinstance(stop_decision, dict) else getattr(stop_decision, "stop", False))
     return "judge_gate" if stop else "planner"
+
+
+def _route_vision_inspector(state: AgentState) -> Literal["vision_inspector", "skip_vision_inspector"]:
+    enable_vision = bool(state.get("enable_vision", False))
+    pdf_path = (state.get("pdf_path") or "").strip()
+    return "vision_inspector" if enable_vision and pdf_path else "skip_vision_inspector"
 
 
 def _route_planner(state: AgentState) -> Literal["executor", "judge_gate", "error_handler"]:
@@ -91,6 +97,7 @@ def build_graph():
     builder.add_node("repo_investigator", repo_investigator)
     builder.add_node("doc_analyst", doc_analyst)
     builder.add_node("skip_doc_analyst", skip_doc_analyst)
+    builder.add_node("skip_vision_inspector", skip_vision_inspector)
     # FIXED: C3+O1
     builder.add_node("vision_inspector", vision_inspector_node)
 
@@ -114,7 +121,6 @@ def build_graph():
 
     # ── Detective fan-out ─────────────────────────────────────────────────────
     builder.add_edge(START, "repo_investigator")
-    builder.add_edge(START, "vision_inspector")
 
     builder.add_conditional_edges(
         START,
@@ -124,12 +130,21 @@ def build_graph():
             "skip_doc_analyst": "skip_doc_analyst",
         },
     )
+    builder.add_conditional_edges(
+        START,
+        _route_vision_inspector,
+        {
+            "vision_inspector": "vision_inspector",
+            "skip_vision_inspector": "skip_vision_inspector",
+        },
+    )
 
     # ── Detective fan-in barrier ──────────────────────────────────────────────
     builder.add_edge("repo_investigator", "evidence_aggregator")
     builder.add_edge("doc_analyst", "evidence_aggregator")
     builder.add_edge("skip_doc_analyst", "evidence_aggregator")
     builder.add_edge("vision_inspector", "evidence_aggregator")
+    builder.add_edge("skip_vision_inspector", "evidence_aggregator")
 
     # ── Judicial fan-out ──────────────────────────────────────────────────────
     builder.add_edge("evidence_aggregator", "planner")
@@ -193,6 +208,7 @@ if __name__ == "__main__":
     base_state = {
         "repo_url": "https://github.com/nebiyou27/automaton-auditor.git",
         "pdf_path": "",  # leave blank unless you have a real local pdf path
+        "enable_vision": False,
         "repo_path": "",
         "rubric_path": "rubric/week2_rubric.json",
         "evidences": {},

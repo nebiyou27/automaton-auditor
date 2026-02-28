@@ -601,6 +601,8 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
     total = 0
     count = 0
     contradiction_count = 0
+    has_pdf = bool((state.get("pdf_path") or "").strip())
+    vision_enabled = bool(state.get("enable_vision", False))
 
     for criterion_id in CANONICAL_DIMENSION_IDS:
         raw_ops = grouped.get(criterion_id, [])
@@ -719,9 +721,18 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
                     f"- `{criterion_id}`: Improve implementation and add file-level evidence citations."
                 )
 
+        config_note = ""
+        if criterion_id == "swarm_visual" and (not vision_enabled or not has_pdf):
+            config_note = (
+                "**Configuration Note:** Vision analysis skipped for this run "
+                "(enable_vision=false or pdf_path missing)."
+            )
+
         criterion_sections.append(
             f"""### Dimension: {criterion_id}
 **Final Score:** {final_score}/5
+
+{config_note}
 
 **Dissent Summary:**
 {dissent_summary}

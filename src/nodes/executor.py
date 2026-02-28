@@ -289,6 +289,13 @@ def executor_node(state: AgentState) -> Dict[str, object]:
         if call is not None:
             calls.append(call)
 
+    has_pdf = bool((state.get("pdf_path") or "").strip())
+    vision_enabled = bool(state.get("enable_vision", False))
+    can_run_vision = has_pdf and vision_enabled
+    if not can_run_vision:
+        blocked_tools = {"pdf_image_extract", "vision_analyze", "extract_images_from_pdf"}
+        calls = [c for c in calls if c.tool_name not in blocked_tools]
+
     calls = calls[:3]
     if not calls:
         return {"evidences": {"executor": []}, "tool_runs": []}
