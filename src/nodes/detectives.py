@@ -121,7 +121,7 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
             if exists and os.path.isfile(full):
                 try:
                     with open(full, "r", encoding="utf-8", errors="ignore") as f:
-                        snippet = f.read(500)
+                        snippet = f.read(2000)
                 except Exception:
                     snippet = None
 
@@ -173,6 +173,21 @@ def repo_investigator(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]
                         else graph_res.error or "AST graph analysis failed."
                     ),
                     content=str(graph_res.data)[:900] if graph_res.ok else None,
+                )
+            )
+            graph_src_snippet = None
+            try:
+                with open(graph_file, "r", encoding="utf-8", errors="ignore") as f:
+                    graph_src_snippet = f.read(3000)
+            except Exception:
+                graph_src_snippet = None
+            evidences.append(
+                _evidence(
+                    goal="Extract full graph wiring code snippet from src/graph.py",
+                    found=bool(graph_src_snippet),
+                    location="src/graph.py",
+                    rationale="Read raw source snippet directly from graph.py for wiring verification.",
+                    content=graph_src_snippet,
                 )
             )
 
