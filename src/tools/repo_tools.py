@@ -29,15 +29,13 @@ class ToolResult:
 # Git / Repo Tools (Sandboxed)
 # -------------------------------------------------------------------------------
 
+@tool
 def clone_repo_sandboxed(
     repo_url: str,
     timeout_s: int = 90,
     analyzer: Optional[Callable[[str], ToolResult]] = None,
 ) -> ToolResult:
-    """
-    Clone an arbitrary GitHub repo into an isolated temporary directory.
-    If analyzer is provided, run all downstream analysis inside the temp dir context.
-    """
+    """Clone a Git repo into a temporary sandbox and optionally run an analyzer callback. Input expects repo_url plus optional timeout_s and analyzer. Returns a ToolResult with clone metadata or an error."""
     if not repo_url or not isinstance(repo_url, str):
         return ToolResult(ok=False, error="Invalid repo_url (empty or not a string).")
 
@@ -82,11 +80,9 @@ def clone_repo_sandboxed(
         return ToolResult(ok=False, error=f"Unexpected error during clone: {e!r}")
 
 
+@tool
 def extract_git_history(repo_path: str, max_commits: int = 200) -> ToolResult:
-    """
-    Extract commit history in chronological order with hash/message/date.
-    Handles empty repos and missing .git gracefully.
-    """
+    """Extract chronological commit history with hash, message, and timestamp from a local Git repo. Input expects repo_path and optional max_commits. Returns a ToolResult containing commit records or an error."""
     if not repo_path or not os.path.isdir(repo_path):
         return ToolResult(ok=False, error=f"Invalid repo_path: {repo_path}")
 
@@ -183,16 +179,9 @@ def grep_search(repo_path: str, term: str) -> ToolResult:
     return ToolResult(ok=True, data={"term": term, "count": len(matches), "matches": matches})
 
 
+@tool
 def analyze_langgraph_graph_py(graph_file_path: str) -> ToolResult:
-    """
-    AST-based verification of LangGraph structure:
-    - Detect StateGraph instantiation
-    - Count add_node/add_edge calls
-    - Identify fan-out patterns (multiple edges from START or a common node)
-    - Detect presence of aggregator node name hint (optional heuristic)
-
-    This does NOT rely on string matching; it traverses the AST.
-    """
+    """Analyze a Python graph file via AST to detect StateGraph wiring and edge patterns. Input expects graph_file_path to a Python file. Returns a ToolResult with structural findings or a parse/read error."""
     ok, source_or_err = _read_text_file(graph_file_path)
     if not ok:
         return ToolResult(ok=False, error=source_or_err)
@@ -253,15 +242,9 @@ def analyze_langgraph_graph_py(graph_file_path: str) -> ToolResult:
     return ToolResult(ok=True, data=findings)
 
 
+@tool
 def find_typed_state_definitions(state_file_path: str) -> ToolResult:
-    """
-    AST-based checks:
-    - Evidence and JudicialOpinion inherit from BaseModel
-    - AgentState inherits from TypedDict
-    - Reducer usage (Annotated[..., operator.add / operator.ior]) appears
-
-    Returns structural facts (not opinions).
-    """
+    """Inspect a state module with AST for class inheritance and reducer annotation usage. Input expects state_file_path to a Python source file. Returns a ToolResult with discovered structural facts or an error."""
     ok, source_or_err = _read_text_file(state_file_path)
     if not ok:
         return ToolResult(ok=False, error=source_or_err)
@@ -309,15 +292,14 @@ def _tokenize(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", (text or "").lower())
 
 
+@tool
 def ingest_pdf_for_query(
     pdf_path: str,
     chunk_size: int = 1200,
     chunk_overlap: int = 150,
     max_pages: int = 250,
 ) -> ToolResult:
-    """
-    Read PDF, chunk extracted text, and return a queryable index.
-    """
+    """Read a PDF, extract text, and split it into overlapping chunks for retrieval. Input expects pdf_path and optional chunk_size, chunk_overlap, and max_pages. Returns a ToolResult containing an index with chunk metadata or an error."""
     if not pdf_path or not isinstance(pdf_path, str):
         return ToolResult(ok=False, error="Invalid pdf_path.")
     if not os.path.isfile(pdf_path):
@@ -375,10 +357,9 @@ def ingest_pdf_for_query(
     )
 
 
+@tool
 def query_pdf_chunks(pdf_index: dict, query: str, top_k: int = 5) -> ToolResult:
-    """
-    Query chunked PDF index with lightweight lexical scoring.
-    """
+    """Query an indexed PDF chunk structure using lexical overlap scoring. Input expects pdf_index, query text, and optional top_k. Returns a ToolResult with the best matching chunks or an error."""
     if not isinstance(pdf_index, dict):
         return ToolResult(ok=False, error="pdf_index must be a dict.")
     chunks = pdf_index.get("chunks")
@@ -423,27 +404,6 @@ def query_pdf_chunks(pdf_index: dict, query: str, top_k: int = 5) -> ToolResult:
             "matches": top,
         },
     )
-
-
-@tool("clone_repo_sandboxed")
-def clone_repo_sandboxed_tool(
-    repo_url: str,
-    timeout_s: int = 90,
-) -> ToolResult:
-    """Clone a Git repository into a temporary sandbox path. Input expects repo_url and optional timeout_s seconds. Returns ToolResult with clone metadata or an error."""
-    return clone_repo_sandboxed(repo_url=repo_url, timeout_s=timeout_s)
-
-
-@tool("extract_git_history")
-def extract_git_history_tool(repo_path: str, max_commits: int = 200) -> ToolResult:
-    """Read git commit history for a cloned repository path. Input expects repo_path and optional max_commits. Returns ToolResult containing commit records or an error."""
-    return extract_git_history(repo_path=repo_path, max_commits=max_commits)
-
-
-@tool("analyze_langgraph_graph_py")
-def analyze_langgraph_graph_py_tool(graph_file_path: str) -> ToolResult:
-    """Analyze a graph Python file with AST to detect LangGraph structure. Input expects graph_file_path to a .py file. Returns ToolResult with structural findings or an error."""
-    return analyze_langgraph_graph_py(graph_file_path=graph_file_path)
 
 
 @tool("grep_search")

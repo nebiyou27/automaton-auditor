@@ -499,3 +499,137 @@ def vision_inspector_node(state: AgentState) -> Dict[str, Dict[str, List[Evidenc
             ]
         }
     }
+
+
+def dynamic_investigator_node(state: AgentState) -> Dict[str, Dict[str, List[Evidence]]]:
+    """LLM reads each rubric criterion, selects tools, then executes them."""
+    import re, json
+    from pathlib import Path
+    from langchain_ollama import ChatOllama
+    from src.tools.rubric_utils import load_rubric, get_dimensions_for
+    from src.tools.repo_tools import analyze_langgraph_graph_py, extract_git_history
+
+    rubric = load_rubric(state.get("rubric_path", "rubric/week2_rubric.json"))
+    dimensions = get_dimensions_for(rubric, "github_repo")
+
+    # Get repo_path from clone evidence
+    repo_path = None
+    for ev in state.get("evidences", {}).get("repo", []):
+        goal = getattr(ev, "goal", "") or ""
+        content = getattr(ev, "content", "") or ""
+        if "clone" in goal.lower() and getattr(ev, "found", False):
+            for part in content.split():
+                if os.path.isdir(part):
+                    repo_path = part
+                    break
+
+    llm = ChatOllama(
+        model=os.getenv("OLLAMA_MODEL", "deepseek-r1:8b"),
+        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        temperature=0,
+        format="json"
+    )
+
+    tool_menu = """
+    Available tools:
+    - check_file_exists(path): verify file exists in repo
+    - read_file(path, chars): read file content
+    - grep_search(term): find term across all .py files
+    - ast_parse(path): analyze Python AST structure
+    - git_log(): get commit history and timestamps
+    """
+
+    all_evidences: List[Evidence] = []
+
+    for dim in dimensions:
+        prompt = f"""You are a forensic investigator.
+Rubric criterion: {json.dumps(dim, indent=2)}
+Available tools: {tool_menu}
+List ONLY checks needed for this criterion.
+Reply JSON only: {{"checks": [{{"tool": str, "target": str, "reason": str}}]}}"""
+
+        try:
+            raw = llm.invoke(prompt).content
+            clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+            checks = json.loads(clean).get("checks", [])
+        except Exception as e:
+            all_evidences.append(_evidence(
+                goal=f"LLM investigation plan for: {dim['id']}",
+                found=False,
+                location="rubric/week2_rubric.json",
+                rationale=f"LLM plan generation failed: {e!r}",
+                confidence=0.0,
+            ))
+            continue
+
+        # Record the plan
+        all_evidences.append(_evidence(
+            goal=f"LLM investigation plan for: {dim['id']}",
+            found=True,
+            location="rubric/week2_rubric.json",
+            rationale=f"LLM dynamically selected {len(checks)} checks for this criterion.",
+            content=json.dumps(checks, indent=2),
+            confidence=0.8,
+        ))
+
+        # Execute each check the LLM selected
+        if not repo_path:
+            continue
+
+        for check in checks:
+            tool_name = check.get("tool", "")
+            target = check.get("target", "")
+            reason = check.get("reason", "")
+            result = None
+            found = False
+
+            try:
+                if tool_name == "check_file_exists":
+                    full = os.path.join(repo_path, target)
+                    found = os.path.exists(full)
+                    result = f"exists={found}"
+
+                elif tool_name == "read_file":
+                    full = os.path.join(repo_path, target)
+                    ok, content = _read_text_file(full, max_chars=2000)
+                    found = ok
+                    result = content[:500] if ok else content
+
+                elif tool_name == "grep_search":
+                    matches = []
+                    for py_file in Path(repo_path).rglob("*.py"):
+                        try:
+                            text = py_file.read_text(encoding="utf-8", errors="ignore")
+                            for i, line in enumerate(text.splitlines(), 1):
+                                if target.lower() in line.lower():
+                                    matches.append(f"{py_file.relative_to(repo_path)}:{i}: {line.strip()}")
+                        except Exception:
+                            continue
+                    found = len(matches) > 0
+                    result = "\n".join(matches[:10])
+
+                elif tool_name == "ast_parse":
+                    full = os.path.join(repo_path, target)
+                    res = analyze_langgraph_graph_py(full)
+                    found = res.ok
+                    result = str(res.data)[:500] if res.ok else res.error
+
+                elif tool_name == "git_log":
+                    res = extract_git_history(repo_path)
+                    found = res.ok
+                    result = str(res.data)[:500] if res.ok else res.error
+
+            except Exception as e:
+                found = False
+                result = f"Execution error: {e!r}"
+
+            all_evidences.append(_evidence(
+                goal=f"Dynamic check [{dim['id']}]: {tool_name} on '{target}'",
+                found=found,
+                location=target or repo_path,
+                rationale=reason,
+                content=str(result)[:500] if result else None,
+                confidence=0.75,
+            ))
+
+    return {"evidences": {"dynamic_plan": all_evidences}}
