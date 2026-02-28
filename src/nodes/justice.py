@@ -5,10 +5,13 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+from datetime import datetime
+from pathlib import Path
 import re
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from src.state import AgentState, JudicialOpinion
 
@@ -38,6 +41,14 @@ def _resolve_score(opinions: List[JudicialOpinion]) -> Dict[str, object]:
         "final_score": final_score,
         "reason": f"Weighted scoring: P={prosecutor}, D={defense}, T={techlead} (double).",
     }
+
+
+def _coerce_score(score: object, default: int = 3) -> int:
+    try:
+        value = int(score)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(5, value))
 
 
 def _extract_cap_from_rule(rule_text: str, default: int = 3) -> int:
@@ -85,22 +96,80 @@ def _extract_security_terms_from_rule(rule_text: str) -> List[str]:
     return terms
 
 
-def _has_security_override(evidences: Dict[str, List[object]], rule_text: str) -> bool:
-    terms = _extract_security_terms_from_rule(rule_text)
-    if not terms:
+def _safe_get(ev: object, key: str, default: object = "") -> object:
+    if isinstance(ev, dict):
+        return ev.get(key, default)
+    return getattr(ev, key, default)
+
+
+def _build_evidence_index(evidences: Dict[str, List[object]]) -> Dict[str, List[object]]:
+    index: Dict[str, List[object]] = {}
+    for items in evidences.values():
+        for ev in items:
+            location = str(_safe_get(ev, "location", "") or "").strip()
+            if not location:
+                continue
+            index.setdefault(location, []).append(ev)
+    return index
+
+
+def _citation_supported(citation: str, evidence_index: Dict[str, List[object]]) -> bool:
+    ref = (citation or "").strip()
+    if not ref:
         return False
+    for location, items in evidence_index.items():
+        if ref == location or ref in location or location in ref:
+            if any(_is_found(ev) for ev in items):
+                return True
+    return False
+
+
+def _extract_text_from_evidence(ev: object) -> str:
+    parts = [
+        str(_safe_get(ev, "dimension_id", "") or ""),
+        str(_safe_get(ev, "goal", "") or ""),
+        str(_safe_get(ev, "rationale", "") or ""),
+        str(_safe_get(ev, "location", "") or ""),
+        str(_safe_get(ev, "content", "") or ""),
+    ]
+    return " ".join(parts).lower()
+
+
+def _has_confirmed_unsafe_tool_engineering_evidence(
+    evidences: Dict[str, List[object]],
+    rule_text: str,
+) -> bool:
+    rule_terms = _extract_security_terms_from_rule(rule_text)
+    unsafe_terms = {
+        "shell injection",
+        "os.system",
+        "unsanitized",
+        "unsafe",
+        "command injection",
+        "subprocess shell=true",
+        "no input sanitization",
+        "temp directory missing",
+        "raw shell",
+    }
+    if rule_terms:
+        unsafe_terms.update(t for t in rule_terms if len(t) > 2)
 
     for items in evidences.values():
         for ev in items:
-            content = ""
-            if isinstance(ev, dict):
-                content = str(ev.get("content", "") or "")
-            else:
-                content = str(getattr(ev, "content", "") or "")
-            lowered = content.lower()
-            if any(term in lowered for term in terms):
+            if not _is_found(ev):
+                continue
+            text = _extract_text_from_evidence(ev)
+            dim = str(_safe_get(ev, "dimension_id", "") or "").lower()
+            if "safe_tool_engineering" not in dim and "tool" not in text and "security" not in text:
+                continue
+            if any(term in text for term in unsafe_terms):
                 return True
     return False
+
+
+def _has_security_override(evidences: Dict[str, List[object]], rule_text: str) -> bool:
+    # Backward-compatible wrapper used by existing detective checks.
+    return _has_confirmed_unsafe_tool_engineering_evidence(evidences, rule_text)
 
 
 def _resolve_rubric_path(rubric_path: str) -> str:
@@ -191,14 +260,245 @@ def _is_score_argument_inconsistent(op: JudicialOpinion) -> bool:
     return False
 
 
+def _is_positive_claim(op: JudicialOpinion) -> bool:
+    return op.score >= 4 or _is_positive_argument(op.argument)
+
+
+def _mentions_modular_workable(argument: str) -> bool:
+    lowered = (argument or "").lower()
+    checks = [
+        "modular",
+        "workable",
+        "maintainable",
+        "fan-out",
+        "fan in",
+        "fan-in",
+        "orchestration",
+        "stategraph",
+    ]
+    hits = sum(1 for c in checks if c in lowered)
+    return hits >= 2
+
+
+def _extract_file_path_from_citation(citation: str) -> str:
+    raw = (citation or "").strip()
+    if not raw:
+        return ""
+    no_line = raw.split("#", 1)[0].split(":", 1)[0]
+    candidate = no_line.strip()
+    if not candidate:
+        return ""
+    if candidate.lower().endswith((".py", ".md", ".json", ".txt", ".yaml", ".yml")):
+        return candidate
+    return ""
+
+
+def _recheck_citation(citation: str, evidence_index: Dict[str, List[object]], state: AgentState) -> Tuple[bool, str]:
+    if _citation_supported(citation, evidence_index):
+        return True, f"`{citation}` found in collected evidence."
+
+    file_path = _extract_file_path_from_citation(citation)
+    if file_path:
+        repo_path = (state.get("repo_path") or "").strip()
+        candidate = Path(file_path)
+        if not candidate.is_absolute() and repo_path:
+            candidate = Path(repo_path) / file_path
+        elif not candidate.is_absolute():
+            candidate = Path.cwd() / file_path
+
+        if candidate.exists() and candidate.is_file():
+            try:
+                snippet = candidate.read_text(encoding="utf-8", errors="ignore")[:1200]
+                if snippet.strip():
+                    return True, f"Re-opened file snippet from `{candidate}`."
+            except Exception:
+                pass
+        return False, f"File snippet re-check failed for `{candidate}`."
+
+    lowered = (citation or "").lower()
+    if ".pdf" in lowered or "chunk" in lowered or "page" in lowered:
+        return False, f"PDF chunk citation `{citation}` not found in indexed evidence."
+    return False, f"Citation `{citation}` could not be matched to evidence."
+
+
+def _maybe_rerun_ast(citations: List[str], state: AgentState) -> Tuple[bool, str]:
+    repo_path = (state.get("repo_path") or "").strip()
+    for citation in citations:
+        path_hint = _extract_file_path_from_citation(citation)
+        if not path_hint or not path_hint.lower().endswith(".py"):
+            continue
+        candidate = Path(path_hint)
+        if not candidate.is_absolute() and repo_path:
+            candidate = Path(repo_path) / path_hint
+        elif not candidate.is_absolute():
+            candidate = Path.cwd() / path_hint
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        try:
+            source = candidate.read_text(encoding="utf-8", errors="ignore")
+            ast.parse(source)
+            return True, f"Re-ran AST parse for `{candidate}`."
+        except Exception as e:
+            return False, f"AST re-check failed for `{candidate}` ({e.__class__.__name__})."
+    return False, "No Python citation available for AST re-check."
+
+
+def _apply_fact_supremacy(
+    op: JudicialOpinion,
+    evidence_index: Dict[str, List[object]],
+    rule_enabled: bool,
+) -> Tuple[JudicialOpinion, List[str]]:
+    notes: List[str] = []
+    if not rule_enabled:
+        return op, notes
+
+    cited = op.cited_evidence or []
+    supported = [c for c in cited if _citation_supported(c, evidence_index)]
+    if _is_positive_claim(op) and len(supported) == 0:
+        original = op.score
+        op.score = min(op.score, 2)
+        notes.append(
+            f"Fact supremacy overruled unsupported {op.judge} claim (score {original} -> {op.score})."
+        )
+    return op, notes
+
+
+def _resolve_weighted_score(
+    criterion_id: str,
+    opinions: List[JudicialOpinion],
+    functionality_weight_rule_enabled: bool,
+) -> Dict[str, object]:
+    scores = {op.judge: _coerce_score(op.score) for op in opinions}
+    prosecutor = scores.get("Prosecutor", 3)
+    defense = scores.get("Defense", 3)
+    techlead = scores.get("TechLead", 3)
+    variance = max(scores.values()) - min(scores.values()) if scores else 0
+
+    graph_criterion = criterion_id == "graph_orchestration"
+    techlead_op = next((op for op in opinions if op.judge == "TechLead"), None)
+    techlead_confirms_modular = bool(
+        techlead_op and techlead_op.score >= 4 and _mentions_modular_workable(techlead_op.argument)
+    )
+    use_highest_techlead_weight = (
+        functionality_weight_rule_enabled and graph_criterion and techlead_confirms_modular
+    )
+
+    if variance > 2:
+        reason = (
+            f"High variance detected (P={prosecutor}, D={defense}, T={techlead}); pending variance re-evaluation."
+        )
+        return {"final_score": techlead, "reason": reason, "variance": variance}
+
+    if use_highest_techlead_weight:
+        total = prosecutor + defense + (4 * techlead)
+        final_score = round(total / 6)
+        reason = (
+            f"Functionality-weight applied for graph orchestration: P={prosecutor}, D={defense}, T={techlead} (x4)."
+        )
+    else:
+        final_score = round((prosecutor + defense + 2 * techlead) / 4)
+        reason = f"Weighted scoring: P={prosecutor}, D={defense}, T={techlead} (x2)."
+    return {"final_score": final_score, "reason": reason, "variance": variance}
+
+
+def _variance_re_evaluation(
+    criterion_id: str,
+    opinions: List[JudicialOpinion],
+    evidence_index: Dict[str, List[object]],
+    state: AgentState,
+    enabled: bool,
+) -> Tuple[int, str, List[str]]:
+    base = _resolve_weighted_score(criterion_id, opinions, functionality_weight_rule_enabled=False)
+    final_score = int(base["final_score"])
+    reason = str(base["reason"])
+    variance = int(base["variance"])
+    notes: List[str] = []
+
+    if not enabled or variance <= 2:
+        return final_score, reason, notes
+
+    notes.append(
+        f"Variance re-evaluation triggered for `{criterion_id}` (variance={variance})."
+    )
+    reliability: Dict[str, float] = {"Prosecutor": 0.0, "Defense": 0.0, "TechLead": 0.0}
+    for op in opinions:
+        citations = op.cited_evidence or []
+        if not citations:
+            reliability[op.judge] = 0.0
+            notes.append(f"{op.judge}: no citations supplied.")
+            continue
+
+        pass_count = 0
+        for citation in citations:
+            ok, detail = _recheck_citation(citation, evidence_index, state)
+            notes.append(f"{op.judge}: {detail}")
+            if ok:
+                pass_count += 1
+
+        ast_ok, ast_detail = _maybe_rerun_ast(citations, state)
+        notes.append(f"{op.judge}: {ast_detail}")
+        if ast_ok:
+            pass_count += 1
+
+        reliability[op.judge] = pass_count / max(1, len(citations) + 1)
+
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for op in opinions:
+        weight = max(0.2, reliability.get(op.judge, 0.0))
+        total_weight += weight
+        weighted_sum += weight * _coerce_score(op.score)
+
+    if total_weight > 0:
+        final_score = round(weighted_sum / total_weight)
+    reason = (
+        f"Variance re-evaluation applied using citation reliability weights "
+        f"(P={reliability.get('Prosecutor', 0.0):.2f}, "
+        f"D={reliability.get('Defense', 0.0):.2f}, "
+        f"T={reliability.get('TechLead', 0.0):.2f})."
+    )
+    return final_score, reason, notes
+
+
+def _resolve_output_markdown_path(state: AgentState) -> Path:
+    preferred = (state.get("report_path") or state.get("out_path") or "").strip()
+    if preferred:
+        path = Path(preferred)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        if path.suffix.lower() != ".md":
+            path = path.with_suffix(".md")
+        return path
+
+    repo_url = str(state.get("repo_url", "") or "")
+    is_self = "nebiyou27" in repo_url
+    folder = "report_onself_generated" if is_self else "report_onpeer_generated"
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    return Path.cwd() / "audit" / folder / f"chief_justice_report_{stamp}.md"
+
+
+def _write_markdown_report(state: AgentState, report: str) -> str:
+    path = _resolve_output_markdown_path(state)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report, encoding="utf-8")
+    return str(path)
+
+
 def generate_markdown_report(state: AgentState, rules: dict) -> str:
     grouped = _group_by_criterion(state.get("opinions", []) or [])
     evidences = state.get("evidences", {}) or {}
+    evidence_index = _build_evidence_index(evidences)
     blockers = _audit_blockers(evidences)
     incomplete_audit = len(blockers) > 0
     security_rule = str(rules.get("security_override", "") or "")
     security_cap = _extract_cap_from_rule(security_rule, default=3)
-    security_override_active = bool(security_rule) and _has_security_override(evidences, security_rule)
+    security_override_active = bool(security_rule) and _has_confirmed_unsafe_tool_engineering_evidence(
+        evidences, security_rule
+    )
+    fact_supremacy_enabled = "fact_supremacy" in rules
+    functionality_weight_enabled = "functionality_weight" in rules
+    dissent_requirement_enabled = "dissent_requirement" in rules
+    variance_re_eval_enabled = "variance_re_evaluation" in rules
 
     criterion_sections: List[str] = []
     remediation: List[str] = []
@@ -207,13 +507,43 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
     contradiction_count = 0
 
     for criterion_id, ops in grouped.items():
+        normalized_ops: List[JudicialOpinion] = []
+        fact_notes: List[str] = []
+        for op in ops:
+            normalized_score = _coerce_score(op.score)
+            if normalized_score != op.score:
+                op.score = normalized_score
+            op, notes = _apply_fact_supremacy(op, evidence_index, fact_supremacy_enabled)
+            normalized_ops.append(op)
+            fact_notes.extend(notes)
+
+        ops = normalized_ops
         if ops:
-            resolution = _resolve_score(ops)
-            final_score = int(resolution["final_score"])
-            reason = str(resolution["reason"])
+            weighted_resolution = _resolve_weighted_score(
+                criterion_id,
+                ops,
+                functionality_weight_rule_enabled=functionality_weight_enabled,
+            )
+            final_score = int(weighted_resolution["final_score"])
+            reason = str(weighted_resolution["reason"])
+            variance = int(weighted_resolution["variance"])
         else:
             final_score = 0
             reason = "No judge opinions available."
+            variance = 0
+
+        re_eval_notes: List[str] = []
+        if variance > 2:
+            v_score, v_reason, v_notes = _variance_re_evaluation(
+                criterion_id=criterion_id,
+                opinions=ops,
+                evidence_index=evidence_index,
+                state=state,
+                enabled=variance_re_eval_enabled,
+            )
+            final_score = v_score
+            reason = v_reason if variance_re_eval_enabled else reason
+            re_eval_notes.extend(v_notes)
 
         dissent_lines = []
         for op in ops:
@@ -225,6 +555,21 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
                 dissent_lines.append(
                     "  - Consistency note: score appears misaligned with argument sentiment."
                 )
+
+        for note in fact_notes:
+            dissent_lines.append(f"- **Fact Supremacy:** {note}")
+        for note in re_eval_notes:
+            dissent_lines.append(f"- **Variance Re-check:** {note}")
+
+        if dissent_requirement_enabled and variance > 2:
+            prosecutor_op = next((op for op in ops if op.judge == "Prosecutor"), None)
+            defense_op = next((op for op in ops if op.judge == "Defense"), None)
+            prosecutor_view = prosecutor_op.argument if prosecutor_op else "No Prosecutor argument."
+            defense_view = defense_op.argument if defense_op else "No Defense argument."
+            dissent_lines.append(
+                f"- **Required Dissent Summary:** Prosecutor argued: \"{prosecutor_view}\" | "
+                f"Defense argued: \"{defense_view}\"."
+            )
 
         if security_override_active and final_score > security_cap:
             final_score = security_cap
@@ -317,4 +662,9 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
 def chief_justice(state: AgentState) -> Dict[str, str]:
     rubric_path = state.get("rubric_path", "rubric/week2_rubric.json")
     rules = _load_synthesis_rules(rubric_path)
-    return {"final_report": generate_markdown_report(state, rules)}
+    report = generate_markdown_report(state, rules)
+    report_path = _write_markdown_report(state, report)
+    report_with_path = (
+        f"{report}\n\n## Output File\n- Markdown report written to: `{report_path}`\n"
+    )
+    return {"final_report": report_with_path}
