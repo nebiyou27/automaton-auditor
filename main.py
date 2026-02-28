@@ -28,6 +28,7 @@ def main():
         {
             "repo_url": repo_url,
             "pdf_path": pdf_path,
+            "repo_path": "",
             "rubric_path": rubric_path,
             "evidences": {},
             "opinions": [],

@@ -49,6 +49,7 @@ class AgentState(TypedDict):
     """
     repo_url: str
     pdf_path: str
+    repo_path: NotRequired[str]
 
     rubric_path: NotRequired[str]
 

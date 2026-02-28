@@ -14,7 +14,6 @@ from langgraph.graph import END, START, StateGraph
 from src.state import AgentState
 from src.nodes.detectives import (
     doc_analyst,
-    dynamic_investigator_node,
     repo_investigator,
     vision_inspector_node,
 )
@@ -34,21 +33,6 @@ def _route_doc_analyst(state: AgentState) -> Literal["doc_analyst", "skip_doc_an
     return "doc_analyst" if pdf_path else "skip_doc_analyst"
 
 
-def _route_repo_investigator(state: AgentState) -> str:
-    repo_evidences = state.get("evidences", {}).get("repo", [])
-    clone_evidence = next(
-        (
-            e
-            for e in repo_evidences
-            if "clone" in (getattr(e, "goal", "") or "").lower()
-        ),
-        None,
-    )
-    if clone_evidence and not getattr(clone_evidence, "found", True):
-        return "evidence_aggregator"  # skip straight to aggregator
-    return "evidence_aggregator"  # always safe to aggregate
-
-
 def build_graph():
     """
     Digital Courtroom graph:
@@ -66,7 +50,6 @@ def build_graph():
     builder.add_node("skip_doc_analyst", skip_doc_analyst)
     # FIXED: C3+O1
     builder.add_node("vision_inspector", vision_inspector_node)
-    builder.add_node("dynamic_investigator", dynamic_investigator_node)
 
     # Fan-in evidence sync
     builder.add_node("evidence_aggregator", evidence_aggregator)
@@ -93,9 +76,7 @@ def build_graph():
     )
 
     # ── Detective fan-in barrier ──────────────────────────────────────────────
-    # Wire AFTER repo_investigator, not from START
-    builder.add_edge("repo_investigator", "dynamic_investigator")
-    builder.add_edge("dynamic_investigator", "evidence_aggregator")
+    builder.add_edge("repo_investigator", "evidence_aggregator")
     builder.add_edge("doc_analyst", "evidence_aggregator")
     builder.add_edge("skip_doc_analyst", "evidence_aggregator")
     builder.add_edge("vision_inspector", "evidence_aggregator")
@@ -125,6 +106,7 @@ if __name__ == "__main__":
     base_state = {
         "repo_url": "https://github.com/nebiyou27/automaton-auditor.git",
         "pdf_path": "",  # leave blank unless you have a real local pdf path
+        "repo_path": "",
         "rubric_path": "rubric/week2_rubric.json",
         "evidences": {},
         "opinions": [],
