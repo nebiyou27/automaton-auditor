@@ -28,6 +28,21 @@ def _route_doc_analyst(state: AgentState) -> Literal["doc_analyst", "skip_doc_an
     return "doc_analyst" if pdf_path else "skip_doc_analyst"
 
 
+def _route_repo_investigator(state: AgentState) -> str:
+    repo_evidences = state.get("evidences", {}).get("repo", [])
+    clone_evidence = next(
+        (
+            e
+            for e in repo_evidences
+            if "clone" in (getattr(e, "goal", "") or "").lower()
+        ),
+        None,
+    )
+    if clone_evidence and not getattr(clone_evidence, "found", True):
+        return "evidence_aggregator"  # skip straight to aggregator
+    return "evidence_aggregator"  # always safe to aggregate
+
+
 def build_graph():
     """
     Digital Courtroom graph:
@@ -71,7 +86,11 @@ def build_graph():
     )
 
     # ── Detective fan-in barrier ──────────────────────────────────────────────
-    builder.add_edge("repo_investigator", "evidence_aggregator")
+    builder.add_conditional_edges(
+        "repo_investigator",
+        _route_repo_investigator,
+        {"evidence_aggregator": "evidence_aggregator"},
+    )
     builder.add_edge("doc_analyst", "evidence_aggregator")
     builder.add_edge("skip_doc_analyst", "evidence_aggregator")
     builder.add_edge("vision_inspector", "evidence_aggregator")
