@@ -13,7 +13,7 @@ from pathlib import Path
 import re
 from typing import Dict, List, Tuple
 
-from src.rubric_ids import CANONICAL_DIMENSION_IDS
+from src.rubric_ids import CANONICAL_DIMENSION_IDS, LEGACY_ID_ALIASES
 from src.state import AgentState, JudicialOpinion
 
 JUDGE_ORDER = ("Prosecutor", "Defense", "TechLead")
@@ -22,6 +22,10 @@ MODE_TO_FOLDER = {
     "peer": "report_onpeer_generated",
     "received": "report_bypeer_received",
 }
+DIMENSION_HEADING_PATTERN = re.compile(
+    r"^\s*###\s+(?:Dimension|Criterion)\s*:\s*([a-z0-9_]+)\s*$",
+    flags=re.IGNORECASE,
+)
 
 
 def _group_by_criterion(opinions: List[JudicialOpinion]) -> Dict[str, List[JudicialOpinion]]:
@@ -527,6 +531,54 @@ def _write_markdown_report(state: AgentState, report: str) -> str:
     return str(path)
 
 
+def _detect_heading_dimension_ids(report: str) -> List[str]:
+    ids: List[str] = []
+    for line in report.splitlines():
+        m = DIMENSION_HEADING_PATTERN.match(line)
+        if m:
+            ids.append(m.group(1).strip())
+    return ids
+
+
+def _enforce_report_compliance(report: str) -> Tuple[str, List[str]]:
+    """
+    Enforce final markdown compliance:
+    - All 10 v3 rubric IDs must appear as section headings.
+    - Legacy IDs are disallowed; map deterministically to v3 IDs.
+    """
+    warnings: List[str] = []
+    compliant_report = report
+
+    legacy_hits = [legacy_id for legacy_id in LEGACY_ID_ALIASES if legacy_id in compliant_report]
+    if legacy_hits:
+        warnings.append(
+            "Legacy rubric IDs detected and remapped: " + ", ".join(sorted(set(legacy_hits)))
+        )
+        for legacy_id, canonical_id in LEGACY_ID_ALIASES.items():
+            compliant_report = re.sub(
+                rf"\b{re.escape(legacy_id)}\b",
+                canonical_id,
+                compliant_report,
+            )
+
+    heading_ids = set(_detect_heading_dimension_ids(compliant_report))
+    missing_ids = [cid for cid in CANONICAL_DIMENSION_IDS if cid not in heading_ids]
+    if missing_ids:
+        warnings.append(
+            "Missing canonical rubric sections auto-inserted: " + ", ".join(missing_ids)
+        )
+        appendix = "\n\n## Auto-Inserted Missing Rubric Sections\n"
+        for cid in missing_ids:
+            appendix += (
+                f"\n### Dimension: {cid}\n"
+                "- **Final Score:** 0/5\n"
+                "- **Compliance Note:** Section was auto-inserted by the report guard.\n"
+            )
+        compliant_report += appendix
+
+    return compliant_report, warnings
+
+
 def generate_markdown_report(state: AgentState, rules: dict) -> str:
     grouped = _group_by_criterion(state.get("opinions", []) or [])
     evidences = state.get("evidences", {}) or {}
@@ -743,8 +795,11 @@ def chief_justice(state: AgentState) -> Dict[str, str]:
     rubric_path = state.get("rubric_path", "rubric/week2_rubric.json")
     rules = _load_synthesis_rules(rubric_path)
     report = generate_markdown_report(state, rules)
-    report_path = _write_markdown_report(state, report)
+    compliant_report, compliance_warnings = _enforce_report_compliance(report)
+    for warning in compliance_warnings:
+        print(f"[report-compliance-guard] WARNING: {warning}")
+    report_path = _write_markdown_report(state, compliant_report)
     report_with_path = (
-        f"{report}\n\n## Output File\n- Markdown report written to: `{report_path}`\n"
+        f"{compliant_report}\n\n## Output File\n- Markdown report written to: `{report_path}`\n"
     )
     return {"final_report": report_with_path}
