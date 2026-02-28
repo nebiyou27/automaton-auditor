@@ -66,6 +66,18 @@ def parse_args() -> argparse.Namespace:
         default=20,
         help="Maximum number of tool calls that may be executed.",
     )
+    parser.add_argument(
+        "--ollama-timeout-s",
+        type=int,
+        default=int((os.getenv("OLLAMA_TIMEOUT_S") or "45").strip() or "45"),
+        help="Ollama request timeout in seconds (also exported as OLLAMA_TIMEOUT_S).",
+    )
+    parser.add_argument(
+        "--ollama-num-predict",
+        type=int,
+        default=int((os.getenv("OLLAMA_NUM_PREDICT") or "256").strip() or "256"),
+        help="Ollama max generated tokens per call (also exported as OLLAMA_NUM_PREDICT).",
+    )
     args = parser.parse_args()
 
     if not (args.repo or "").strip():
@@ -81,12 +93,18 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-iters must be >= 0.")
     if args.tool_budget < 0:
         parser.error("--tool-budget must be >= 0.")
+    if args.ollama_timeout_s <= 0:
+        parser.error("--ollama-timeout-s must be > 0.")
+    if args.ollama_num_predict <= 0:
+        parser.error("--ollama-num-predict must be > 0.")
 
     return args
 
 
 def main():
     args = parse_args()
+    os.environ["OLLAMA_TIMEOUT_S"] = str(args.ollama_timeout_s)
+    os.environ["OLLAMA_NUM_PREDICT"] = str(args.ollama_num_predict)
     repo_url = args.repo
     pdf_path = args.pdf
     rubric_path = args.rubric
@@ -100,6 +118,9 @@ def main():
     print(f"- enable_vision: {args.enable_vision}")
     print(f"- max-iters: {args.max_iters}")
     print(f"- tool-budget: {args.tool_budget}")
+    print("Ollama Runtime Config")
+    print(f"- OLLAMA_TIMEOUT_S: {args.ollama_timeout_s}")
+    print(f"- OLLAMA_NUM_PREDICT: {args.ollama_num_predict}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     canonical_folder = MODE_TO_FOLDER[args.mode]

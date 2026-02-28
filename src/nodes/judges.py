@@ -16,12 +16,32 @@ from src.rubric_ids import CANONICAL_DIMENSION_ID_SET, normalize_dimension_id
 from src.state import AgentState, JudicialOpinion
 
 
+def _ollama_timeout_s() -> int:
+    raw = str(os.getenv("OLLAMA_TIMEOUT_S", "45")).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 45
+    return value if value > 0 else 45
+
+
+def _ollama_num_predict() -> int:
+    raw = str(os.getenv("OLLAMA_NUM_PREDICT", "256")).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 256
+    return value if value > 0 else 256
+
+
 def _get_llm() -> ChatOllama:
     return ChatOllama(
         model=os.getenv("OLLAMA_MODEL", "deepseek-r1:8b"),
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         format="json",
         temperature=0.2,
+        num_predict=_ollama_num_predict(),
+        client_kwargs={"timeout": _ollama_timeout_s()},
     )
 
 

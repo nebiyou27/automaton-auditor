@@ -21,6 +21,24 @@ from src.tools.repo_tools import (
 )
 
 
+def _ollama_timeout_s() -> int:
+    raw = str(os.getenv("OLLAMA_TIMEOUT_S", "45")).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 45
+    return value if value > 0 else 45
+
+
+def _ollama_num_predict() -> int:
+    raw = str(os.getenv("OLLAMA_NUM_PREDICT", "256")).strip()
+    try:
+        value = int(raw)
+    except Exception:
+        value = 256
+    return value if value > 0 else 256
+
+
 def _evidence(
     *,
     dimension_id: str,
@@ -189,6 +207,8 @@ def _tool_vision_analyze(state: AgentState, call: ToolCall) -> ToolResult:
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         format="json",
         temperature=0.0,
+        num_predict=_ollama_num_predict(),
+        client_kwargs={"timeout": _ollama_timeout_s()},
     )
     content: List[Dict[str, Any]] = []
     for b64 in images_b64[:3]:
