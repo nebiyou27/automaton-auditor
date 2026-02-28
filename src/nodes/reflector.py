@@ -5,6 +5,7 @@ import os
 import re
 from typing import Dict, List, Tuple
 
+from src.rubric_ids import CANONICAL_DIMENSION_ID_SET, normalize_dimension_id
 from src.state import AgentState, DimensionReflection, StopDecision
 
 PDF_ONLY_DIMENSIONS = {"theoretical_depth", "report_accuracy", "swarm_visual"}
@@ -30,7 +31,17 @@ def _load_dimensions(state: AgentState) -> List[dict]:
     except Exception:
         return []
     dims = data.get("dimensions", []) if isinstance(data, dict) else []
-    return [d for d in dims if isinstance(d, dict)]
+    out: List[dict] = []
+    for d in dims if isinstance(dims, list) else []:
+        if not isinstance(d, dict):
+            continue
+        nid = normalize_dimension_id(d.get("id"))
+        if not nid or nid not in CANONICAL_DIMENSION_ID_SET:
+            continue
+        copy = dict(d)
+        copy["id"] = nid
+        out.append(copy)
+    return out
 
 
 def _is_found(ev: object) -> bool:

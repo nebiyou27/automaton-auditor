@@ -200,9 +200,6 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
     security_cap = _extract_cap_from_rule(security_rule, default=3)
     security_override_active = bool(security_rule) and _has_security_override(evidences, security_rule)
 
-    if not grouped:
-        grouped = {"detective_phase": []}
-
     criterion_sections: List[str] = []
     remediation: List[str] = []
     total = 0

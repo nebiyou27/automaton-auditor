@@ -82,44 +82,46 @@ def _read_text_file(path: str, max_chars: int = 2000) -> tuple[bool, str]:
 
 
 REQUIRED_CHECKS_BY_CRITERION: Dict[str, List[Dict[str, str]]] = {
-    "typed_state_definitions": [
+    "git_forensic_analysis": [
+        {"tool": "git_log", "target": "", "reason": "Extract full commit progression and timestamps."},
+    ],
+    "state_management_rigor": [
         {"tool": "check_file_exists", "target": "src/state.py", "reason": "State typing source must exist."},
         {"tool": "grep_search", "target": "class Evidence(BaseModel)", "reason": "Verify BaseModel evidence type."},
         {"tool": "grep_search", "target": "class JudicialOpinion(BaseModel)", "reason": "Verify BaseModel opinion type."},
         {"tool": "grep_search", "target": "operator.ior", "reason": "Verify parallel-safe evidence reducer."},
         {"tool": "grep_search", "target": "operator.add", "reason": "Verify parallel-safe opinion reducer."},
     ],
-    "forensic_tool_engineering": [
+    "safe_tool_engineering": [
         {"tool": "check_file_exists", "target": "src/tools/repo_tools.py", "reason": "Tool implementation file must exist."},
         {"tool": "grep_search", "target": "TemporaryDirectory(", "reason": "Verify sandboxed clone lifecycle."},
         {"tool": "grep_search", "target": "query_pdf_chunks", "reason": "Verify PDF query interface exists."},
         {"tool": "grep_search", "target": "os.system(", "reason": "Detect unsafe shell usage if present."},
         {"tool": "grep_search", "target": "try:", "reason": "Find explicit exception handling in tooling."},
     ],
-    "detective_node_implementation": [
-        {"tool": "check_file_exists", "target": "src/nodes/detectives.py", "reason": "Detective node implementation must exist."},
-        {"tool": "grep_search", "target": "def repo_investigator", "reason": "Verify repo detective entrypoint exists."},
-        {"tool": "grep_search", "target": "Evidence(", "reason": "Verify structured Evidence object creation."},
-        {"tool": "grep_search", "target": "found=False", "reason": "Verify missing-artifact handling paths."},
-    ],
-    "partial_graph_orchestration": [
+    "graph_orchestration": [
         {"tool": "check_file_exists", "target": "src/graph.py", "reason": "Graph orchestration file must exist."},
         {"tool": "grep_search", "target": "StateGraph(", "reason": "Verify graph compilation wiring exists."},
         {"tool": "grep_search", "target": "add_edge(", "reason": "Verify edge wiring for fan-in/fan-out."},
         {"tool": "grep_search", "target": "add_conditional_edges(", "reason": "Verify conditional routing exists."},
     ],
-    "project_infrastructure": [
-        {"tool": "check_file_exists", "target": "README.md", "reason": "README is required for reproducible setup."},
-        {"tool": "check_file_exists", "target": ".env.example", "reason": "Example environment file is required."},
-        {"tool": "check_file_exists", "target": "requirements.txt", "reason": "Dependency manifest should exist."},
-        {"tool": "check_file_exists", "target": "requirements.lock", "reason": "Dependency lock file should exist."},
-        {"tool": "grep_search", "target": "LANGCHAIN_API_KEY=", "reason": "Detect committed hardcoded secret values."},
+    "structured_output_enforcement": [
+        {"tool": "check_file_exists", "target": "src/nodes/judges.py", "reason": "Judge implementation must exist."},
+        {"tool": "grep_search", "target": "JudicialOpinion", "reason": "Structured opinion schema should be referenced."},
+        {"tool": "grep_search", "target": "_invoke_structured(", "reason": "Structured invocation helper should exist."},
+        {"tool": "grep_search", "target": "JSONDecodeError", "reason": "Malformed JSON handling should exist."},
     ],
-    "judicial_nuance_dialectics": [
+    "judicial_nuance": [
         {"tool": "check_file_exists", "target": "src/nodes/judges.py", "reason": "Judge personas implementation should exist."},
+        {"tool": "grep_search", "target": "PROSECUTOR_SYSTEM", "reason": "Prosecutor persona prompt should exist."},
+        {"tool": "grep_search", "target": "DEFENSE_SYSTEM", "reason": "Defense persona prompt should exist."},
+        {"tool": "grep_search", "target": "TECHLEAD_SYSTEM", "reason": "Tech Lead persona prompt should exist."},
+    ],
+    "chief_justice_synthesis": [
         {"tool": "check_file_exists", "target": "src/nodes/justice.py", "reason": "Chief justice synthesis should exist."},
-        {"tool": "grep_search", "target": "JudicialOpinion", "reason": "Verify structured judicial output type."},
-        {"tool": "grep_search", "target": "criterion_id", "reason": "Verify mapping opinions to rubric criteria IDs."},
+        {"tool": "grep_search", "target": "generate_markdown_report", "reason": "Structured markdown synthesis should exist."},
+        {"tool": "grep_search", "target": "_resolve_score(", "reason": "Deterministic resolution logic should exist."},
+        {"tool": "grep_search", "target": "_has_security_override(", "reason": "Security override rule evaluation should exist."},
     ],
 }
 

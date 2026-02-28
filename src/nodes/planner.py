@@ -5,7 +5,8 @@ import os
 import re
 from typing import Dict, List, Tuple
 
-from src.state import AgentState, ToolCall
+from src.rubric_ids import CANONICAL_DIMENSION_ID_SET, normalize_dimension_id
+from src.state import AgentState, Evidence, ToolCall
 
 
 def _to_text(value: object) -> str:
@@ -123,6 +124,18 @@ def _is_found(ev: object) -> bool:
     return bool(getattr(ev, "found", False))
 
 
+def _validation_evidence(dimension_id: str, found: bool, rationale: str, content: str) -> Evidence:
+    return Evidence(
+        dimension_id=dimension_id,
+        goal=f"Planner dimension validation: {dimension_id or 'unsupported'}",
+        found=found,
+        location="rubric/week2_rubric.json",
+        rationale=rationale,
+        content=content[:700],
+        confidence=1.0 if found else 0.6,
+    )
+
+
 def planner_node(state: AgentState) -> Dict[str, object]:
     rubric, rubric_err = _load_rubric(state)
     if rubric_err:
@@ -133,20 +146,60 @@ def planner_node(state: AgentState) -> Dict[str, object]:
             "failed_node": "planner",
         }
 
-    dimensions = rubric.get("dimensions", [])
-    if not isinstance(dimensions, list):
-        dimensions = []
+    raw_dimensions = rubric.get("dimensions", [])
+    dimensions = raw_dimensions if isinstance(raw_dimensions, list) else []
 
     evidence_rows = _flatten_evidence(state)
     ranked: List[Tuple[int, dict, str]] = []
+    validation: List[Evidence] = []
 
-    for dim in dimensions:
+    for idx, dim in enumerate(dimensions):
         if not isinstance(dim, dict):
             continue
-        dim_id = _to_text(dim.get("id", "")).strip()
+        raw_id = _to_text(dim.get("id", "")).strip()
+        dim_id = normalize_dimension_id(raw_id)
         dim_name = _to_text(dim.get("name", "")).strip()
-        if not dim_id:
+        if not raw_id:
+            validation.append(
+                _validation_evidence(
+                    "",
+                    False,
+                    "Dimension has no id; cannot be handled by planner/toolset.",
+                    f"dimension_index={idx}",
+                )
+            )
             continue
+        if not dim_id or dim_id not in CANONICAL_DIMENSION_ID_SET:
+            validation.append(
+                _validation_evidence(
+                    "",
+                    False,
+                    "Unsupported rubric dimension id; planner/toolset has no mapped handler.",
+                    f"raw_id={raw_id}",
+                )
+            )
+            continue
+        if raw_id != dim_id:
+            validation.append(
+                _validation_evidence(
+                    dim_id,
+                    True,
+                    "Legacy rubric id translated to canonical v3 id.",
+                    f"raw_id={raw_id} -> canonical_id={dim_id}",
+                )
+            )
+        else:
+            validation.append(
+                _validation_evidence(
+                    dim_id,
+                    True,
+                    "Dimension id is canonical and handled by planner/toolset.",
+                    f"id={dim_id}",
+                )
+            )
+
+        dim = dict(dim)
+        dim["id"] = dim_id
 
         related = []
         for bucket, ev in evidence_rows:
@@ -192,6 +245,7 @@ def planner_node(state: AgentState) -> Dict[str, object]:
 
     return {
         "planned_tool_calls": planned_calls[:3],
+        "evidences": {"planner_validation": validation},
         "error_type": "",
         "error_message": "",
         "failed_node": "",

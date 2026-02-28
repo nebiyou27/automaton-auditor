@@ -8,21 +8,59 @@ import json
 import os
 import re
 from json import JSONDecodeError
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_ollama import ChatOllama
 
+from src.rubric_ids import CANONICAL_DIMENSION_ID_SET, normalize_dimension_id
 from src.state import AgentState, JudicialOpinion
 
 
-def _get_structured_llm():
-    llm = ChatOllama(
+def _get_llm() -> ChatOllama:
+    return ChatOllama(
         model=os.getenv("OLLAMA_MODEL", "deepseek-r1:8b"),
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         format="json",
         temperature=0.2,
     )
-    return llm, llm.with_structured_output(JudicialOpinion)
+
+
+def _normalize_judge(value: object, fallback: str) -> str:
+    text = str(value or "").strip().lower()
+    mapping = {
+        "prosecutor": "Prosecutor",
+        "defense": "Defense",
+        "defence": "Defense",
+        "techlead": "TechLead",
+        "tech_lead": "TechLead",
+        "tech lead": "TechLead",
+    }
+    return mapping.get(text, fallback)
+
+
+def _coerce_score(value: object, default: int = 3) -> int:
+    try:
+        score = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(5, score))
+
+
+def _coerce_cited_evidence(value: object) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        v = value.strip()
+        return [v] if v else []
+    if isinstance(value, list):
+        out: List[str] = []
+        for item in value:
+            s = str(item).strip()
+            if s:
+                out.append(s)
+        return out
+    s = str(value).strip()
+    return [s] if s else []
 
 
 def _safe_get(ev, key: str, default=None):
@@ -31,8 +69,13 @@ def _safe_get(ev, key: str, default=None):
     return getattr(ev, key, default)
 
 
-def _format_evidence_for_judges(state: AgentState, max_items_per_bucket: int = 25) -> str:
+def _format_evidence_for_judges(
+    state: AgentState,
+    criterion_id: str = "",
+    max_items_per_bucket: int = 25,
+) -> str:
     evidences = state.get("evidences", {}) or {}
+    keywords = [k for k in re.split(r"[_\W]+", criterion_id.lower()) if k]
     lines: List[str] = []
     for bucket, items in evidences.items():
         lines.append(f"\n=== EVIDENCE BUCKET: {str(bucket).upper()} (showing up to {max_items_per_bucket}) ===")
@@ -40,7 +83,24 @@ def _format_evidence_for_judges(state: AgentState, max_items_per_bucket: int = 2
             lines.append("- [WARN] bucket items are not a list (ignored).")
             continue
 
-        for ev in items[:max_items_per_bucket]:
+        selected = items
+        if keywords:
+            matched = []
+            for ev in items:
+                hay = " ".join(
+                    [
+                        str(_safe_get(ev, "goal", "")),
+                        str(_safe_get(ev, "location", "")),
+                        str(_safe_get(ev, "rationale", "")),
+                        str(_safe_get(ev, "content", "")),
+                    ]
+                ).lower()
+                if any(k in hay for k in keywords):
+                    matched.append(ev)
+            if matched:
+                selected = matched
+
+        for ev in selected[:max_items_per_bucket]:
             found = bool(_safe_get(ev, "found", False))
             goal = str(_safe_get(ev, "goal", ""))
             location = str(_safe_get(ev, "location", ""))
@@ -132,9 +192,8 @@ def _load_rubric_ids_and_hints(
     for d in dims:
         if not isinstance(d, dict):
             continue
-        cid = d.get("id")
-        if isinstance(cid, str) and cid.strip():
-            cid = cid.strip()
+        cid = normalize_dimension_id(d.get("id"))
+        if isinstance(cid, str) and cid.strip() and cid in CANONICAL_DIMENSION_ID_SET:
             ids.append(cid)
             name = str(d.get("name", "")).strip()
             instr = str(d.get("forensic_instruction", "")).strip()
@@ -212,9 +271,15 @@ def _coerce_opinion(op: object, persona: str, criterion_id: str) -> Optional[Jud
         op.criterion_id = criterion_id
         return op
     if isinstance(op, dict):
-        op["judge"] = persona
-        op["criterion_id"] = criterion_id
-        return JudicialOpinion(**op)
+        payload: Dict[str, Any] = dict(op)
+        payload["judge"] = _normalize_judge(payload.get("judge"), persona)
+        payload["criterion_id"] = criterion_id
+        payload["score"] = _coerce_score(payload.get("score"))
+        payload["argument"] = str(payload.get("argument", "")).strip()
+        payload["cited_evidence"] = _coerce_cited_evidence(payload.get("cited_evidence"))
+        if not payload["argument"]:
+            return None
+        return JudicialOpinion(**payload)
     return None
 
 
@@ -244,15 +309,21 @@ def _coerce_opinion_from_raw_text(raw_text: str, persona: str, criterion_id: str
                 parsed = candidate
                 break
 
-        if isinstance(parsed.get("cited_evidence"), str):
-            parsed["cited_evidence"] = [parsed["cited_evidence"]]
+        if isinstance(parsed.get("reasoning"), str) and not parsed.get("argument"):
+            parsed["argument"] = parsed["reasoning"]
+        if isinstance(parsed.get("justification"), str) and not parsed.get("argument"):
+            parsed["argument"] = parsed["justification"]
+        if isinstance(parsed.get("evidence"), list) and not parsed.get("cited_evidence"):
+            parsed["cited_evidence"] = parsed["evidence"]
+        if isinstance(parsed.get("citations"), list) and not parsed.get("cited_evidence"):
+            parsed["cited_evidence"] = parsed["citations"]
 
     return _coerce_opinion(parsed, persona, criterion_id)
 
 
 def _fallback_opinions(persona: str, criterion_ids: List[str], message: str, score: int = 3) -> List[JudicialOpinion]:
     if not criterion_ids:
-        criterion_ids = ["rubric_load_failed"]
+        return []
 
     safe_score = max(1, min(5, int(score)))
     return [
@@ -278,6 +349,20 @@ def _single_criterion_prompt(
     return f"""
 {persona_system}
 
+You must return EXACTLY one JSON object with this shape:
+{{
+  "judge": "{persona}",
+  "criterion_id": "{criterion_id}",
+  "score": <integer 1-5>,
+  "argument": "<2-6 sentences grounded in evidence>",
+  "cited_evidence": ["<file_or_evidence_ref>", "..."]
+}}
+Rules:
+- Return JSON only (no markdown, no commentary).
+- Use only the criterion and evidence shown below.
+- Keep score aligned with argument sentiment and scoring guide.
+- If evidence is missing, set lower score and explain that clearly.
+
 Your specific instruction for this criterion:
 {judicial_instruction}
 
@@ -290,22 +375,7 @@ Evidence:
 
 
 def _invoke_structured(prompt: str, persona: str, criterion_id: str) -> JudicialOpinion:
-    _llm, _structured_llm = _get_structured_llm()
-    try:
-        op = _coerce_opinion(_structured_llm.invoke(prompt), persona, criterion_id)
-        if op and _is_score_argument_inconsistent(op.score, op.argument):
-            retry_prompt = (
-                f"{prompt}\n\n"
-                "Validation step: Your previous score and argument sentiment were inconsistent. "
-                "Return corrected JSON where score strictly matches the argument and scoring guide."
-            )
-            retried = _coerce_opinion(_structured_llm.invoke(retry_prompt), persona, criterion_id)
-            if retried:
-                return retried
-        if op:
-            return op
-    except Exception:
-        pass
+    _llm = _get_llm()
 
     try:
         raw = _llm.invoke(prompt)
@@ -331,7 +401,7 @@ def _invoke_structured(prompt: str, persona: str, criterion_id: str) -> Judicial
         judge=persona,  # type: ignore[arg-type]
         criterion_id=criterion_id,
         score=3,
-        argument="Invalid model JSON schema; neutral fallback generated.",
+        argument="Model output could not be parsed into required JSON; neutral fallback generated.",
         cited_evidence=[],
     )
 
@@ -339,9 +409,8 @@ def _invoke_structured(prompt: str, persona: str, criterion_id: str) -> Judicial
 def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> List[JudicialOpinion]:
     ids, hints, judicial_logic_by_id, err = _load_rubric_ids_and_hints(state)
     if err:
-        return _fallback_opinions(persona, ["rubric_load_failed"], err, score=3)
+        return []
 
-    evidence_text = _format_evidence_for_judges(state)
     persona_key = {
         "Prosecutor": "prosecutor",
         "Defense": "defense",
@@ -352,6 +421,7 @@ def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> 
         judicial_instruction = ""
         if persona_key:
             judicial_instruction = judicial_logic_by_id.get(cid, {}).get(persona_key, "")
+        evidence_text = _format_evidence_for_judges(state, criterion_id=cid)
         prompt = _single_criterion_prompt(
             persona,
             persona_system,
