@@ -26,23 +26,30 @@ and optional PDF report against a rubric using a Digital Courtroom pattern:
 
 ## Running
 ```powershell
-python main.py <repo_url> <pdf_path> <rubric_path>
+python main.py --repo <repo_url> --pdf <pdf_path> --rubric <rubric_path>
 ```
 
 **Example — audit a peer's repo with their PDF:**
 ```powershell
-python main.py https://github.com/peer/repo.git C:\docs\peer_report.pdf rubric/week2_rubric.json
+python main.py --repo https://github.com/peer/repo.git --pdf C:\docs\peer_report.pdf --rubric rubric/week2_rubric.json
 ```
 
 **Example — audit without PDF (PDF analysis skipped):**
 ```powershell
-python main.py https://github.com/nebiyou27/automaton-auditor.git
+python main.py --repo https://github.com/nebiyou27/automaton-auditor.git
+```
+
+**Example - custom output path + vision flag:**
+```powershell
+python main.py --repo https://github.com/peer/repo.git --rubric rubric/week2_rubric.json --out audit/report_onpeer_generated/custom_report.md --enable-vision
 ```
 
 If arguments are omitted, defaults are used:
-- `repo_url`: `https://github.com/nebiyou27/automaton-auditor.git`
-- `pdf_path`: empty (routes through `skip_doc_analyst`)
-- `rubric_path`: `rubric/week2_rubric.json`
+- `--repo`: `https://github.com/nebiyou27/automaton-auditor.git`
+- `--pdf`: empty (routes through `skip_doc_analyst`)
+- `--rubric`: `rubric/week2_rubric.json`
+- `--out`: auto-generated timestamped report path
+- `--enable-vision`: parsed as a boolean flag
 
 Reports are written to:
 audit/report_onpeer_generated/audit_report_YYYYMMDD_HHMM.md
