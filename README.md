@@ -103,5 +103,6 @@ automaton-auditor/
 - `requirements.txt` installs from `requirements.lock` for reproducible builds
 - If `LANGCHAIN_API_KEY` is empty, tracing is automatically disabled in `main.py`
 - VisionInspector requires `pymupdf` — included in `requirements.txt`
-- `tests/` contains a placeholder pending test coverage
+- Judge outputs keep `with_structured_output(JudicialOpinion)` and add a sanitized raw-text fallback (first-JSON extraction + score normalization) before JudgeRepair.
+- Executor now records one `Evidence` item per planned tool call, including blocked/failed calls, so execution trails remain complete.
 

@@ -246,30 +246,32 @@ def _tool_to_evidence(call: ToolCall, result: ToolResult) -> Evidence:
     else:
         found = bool(result.ok)
 
-    location = str(
+    target = str(
         call.args.get("path")
         or call.args.get("pdf_path")
         or call.args.get("repo_path")
         or call.args.get("repo_url")
         or ""
     ).strip()
+    location = target
     if location == "$state.pdf_path":
         location = ""
     if not location:
         location = str((result.data or {}).get("pdf_path", "")).strip() or str(stateful_location_hint(call))
+    location = f"{call.tool_name}:{location or 'n/a'}"
 
     rationale = call.why
     if not result.ok and result.error:
-        rationale = f"{call.why} Tool error: {result.error}"
+        rationale = f"{call.why} | failed: {str(result.error)[:300]}"
 
     return _evidence(
         dimension_id=call.dimension_id,
-        goal=f"Executor dispatched `{call.tool_name}` for `{call.dimension_id}`",
+        goal=call.expected_evidence or call.why or f"Execute tool {call.tool_name}",
         found=found,
         location=location or "n/a",
         rationale=rationale,
         content=(json.dumps(payload, default=str)[:1200] if payload is not None else None),
-        confidence=0.9 if found else 0.35,
+        confidence=0.9 if found else 0.2,
     )
 
 
@@ -284,25 +286,32 @@ def stateful_location_hint(call: ToolCall) -> str:
 def executor_node(state: AgentState) -> Dict[str, object]:
     calls_raw = state.get("planned_tool_calls", []) or []
     calls: List[ToolCall] = []
+    evidences: List[Evidence] = []
+    runs: List[ToolRunMetadata] = []
     for item in calls_raw:
         call = _as_tool_call(item)
         if call is not None:
             calls.append(call)
+            continue
+        evidences.append(
+            _evidence(
+                dimension_id="unscoped",
+                goal="Malformed planned ToolCall payload",
+                found=False,
+                location="planner:planned_tool_calls",
+                rationale="Executor could not parse a planned tool call payload.",
+                content=str(item)[:1200],
+                confidence=0.2,
+            )
+        )
 
     has_pdf = bool((state.get("pdf_path") or "").strip())
     vision_enabled = bool(state.get("enable_vision", False))
     can_run_vision = has_pdf and vision_enabled
-    if not can_run_vision:
-        blocked_tools = {"pdf_image_extract", "vision_analyze", "extract_images_from_pdf"}
-        calls = [c for c in calls if c.tool_name not in blocked_tools]
-
-    calls = calls[:3]
     if not calls:
-        return {"evidences": {"executor": []}, "tool_runs": []}
+        return {"evidences": {"executor": evidences}, "tool_runs": runs}
 
     active_pdf_index = state.get("pdf_index") if isinstance(state.get("pdf_index"), dict) else None
-    evidences: List[Evidence] = []
-    runs: List[ToolRunMetadata] = []
     fatal_error_type = ""
     fatal_error_message = ""
 
@@ -322,19 +331,27 @@ def executor_node(state: AgentState) -> Dict[str, object]:
 
     for call in calls:
         start = time.perf_counter()
-        handler = tool_map.get(call.tool_name)
-        if handler is None:
-            result = _tool_result(False, error=f"Tool not allowed: {call.tool_name}")
+        if call.tool_name in {"pdf_image_extract", "vision_analyze", "extract_images_from_pdf"} and not can_run_vision:
+            result = _tool_result(
+                False,
+                error=(
+                    "Tool blocked by runtime configuration: enable_vision=false or pdf_path missing."
+                ),
+            )
         else:
-            try:
-                result = handler(call)
-                if call.tool_name == "pdf_ingest" and result.ok:
-                    active_pdf_index = result.data or active_pdf_index
-            except Exception as e:
-                result = _tool_result(False, error=f"Unhandled executor exception: {e!r}")
-                if not fatal_error_type:
-                    fatal_error_type = "executor_exception"
-                    fatal_error_message = str(result.error or "")
+            handler = tool_map.get(call.tool_name)
+            if handler is None:
+                result = _tool_result(False, error=f"Tool not allowed: {call.tool_name}")
+            else:
+                try:
+                    result = handler(call)
+                    if call.tool_name == "pdf_ingest" and result.ok:
+                        active_pdf_index = result.data or active_pdf_index
+                except Exception as e:
+                    result = _tool_result(False, error=f"Unhandled executor exception: {e!r}")
+                    if not fatal_error_type:
+                        fatal_error_type = "executor_exception"
+                        fatal_error_message = str(result.error or "")
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         output_payload = result.data if result.ok else {"error": result.error}

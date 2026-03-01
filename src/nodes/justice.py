@@ -229,10 +229,57 @@ def _audit_blockers(evidences: Dict[str, List[object]]) -> List[str]:
     dynamic_items = evidences.get("dynamic_plan", []) or []
     has_plan = any("llm investigation plan for:" in _get_goal(ev).lower() for ev in dynamic_items)
     has_execution = any(_get_goal(ev).startswith("Dynamic check [") for ev in dynamic_items)
+    if not has_execution:
+        executor_items = evidences.get("executor", []) or []
+        has_execution = any("execute" in _get_goal(ev).lower() for ev in executor_items)
     if has_plan and not has_execution:
         blockers.append("Only plan evidence was produced for dynamic checks; execution evidence is missing.")
 
     return blockers
+
+
+def _is_dimension_applicable(
+    criterion_id: str,
+    state: AgentState,
+    reflections_map: Dict[str, object],
+) -> bool:
+    reflection = reflections_map.get(criterion_id)
+    if reflection is not None:
+        if isinstance(reflection, dict):
+            return bool(reflection.get("applicable", True))
+        return bool(getattr(reflection, "applicable", True))
+    has_pdf = bool((state.get("pdf_path") or "").strip())
+    vision_enabled = bool(state.get("enable_vision", False))
+    if criterion_id in {"theoretical_depth", "report_accuracy"} and not has_pdf:
+        return False
+    if criterion_id == "swarm_visual" and (not has_pdf or not vision_enabled):
+        return False
+    return True
+
+
+def _has_judicial_trail(
+    criterion_id: str,
+    opinions: List[JudicialOpinion],
+    state: AgentState,
+) -> bool:
+    by_judge = {op.judge for op in opinions if op.criterion_id == criterion_id}
+    if len(by_judge) == 3:
+        return True
+    failures = state.get("judge_schema_failures", []) or []
+    if any(f"|{criterion_id}|" in str(f) for f in failures):
+        return True
+    repair_items = (state.get("evidences", {}) or {}).get("judge_repair", []) or []
+    for ev in repair_items:
+        text = " ".join(
+            [
+                str(_safe_get(ev, "goal", "") or ""),
+                str(_safe_get(ev, "rationale", "") or ""),
+                str(_safe_get(ev, "content", "") or ""),
+            ]
+        )
+        if criterion_id in text:
+            return True
+    return False
 
 
 def _is_positive_argument(text: str) -> bool:
@@ -584,7 +631,16 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
     evidences = state.get("evidences", {}) or {}
     evidence_index = _build_evidence_index(evidences)
     blockers = _audit_blockers(evidences)
-    incomplete_audit = len(blockers) > 0
+    reflections = list(state.get("reflections", []) or [])
+    reflections_map: Dict[str, object] = {}
+    for r in reflections:
+        rid = str(r.get("dimension_id", "") if isinstance(r, dict) else getattr(r, "dimension_id", "")).strip()
+        if rid:
+            reflections_map[rid] = r
+    planner_ran = bool(evidences.get("planner_validation", []))
+    reflector_ran = bool(reflections)
+    judges_ran = bool(state.get("opinions", []) or state.get("judge_schema_failures", []))
+    required_layers_ran = planner_ran and reflector_ran and judges_ran
     security_rule = str(rules.get("security_override", "") or "")
     security_cap = _extract_cap_from_rule(security_rule, default=3)
     security_override_active = bool(security_rule) and _has_confirmed_unsafe_tool_engineering_evidence(
@@ -600,11 +656,45 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
     remediation: List[str] = []
     total = 0
     count = 0
+    applicable_count = 0
+    inapplicable_count = 0
+    incomplete_dimension_ids: List[str] = []
+    fallback_only_dimensions = 0
     contradiction_count = 0
     has_pdf = bool((state.get("pdf_path") or "").strip())
     vision_enabled = bool(state.get("enable_vision", False))
 
     for criterion_id in CANONICAL_DIMENSION_IDS:
+        applicable = _is_dimension_applicable(criterion_id, state, reflections_map)
+        if not applicable:
+            inapplicable_count += 1
+            criterion_sections.append(
+                f"""### Dimension: {criterion_id}
+**Final Score:** INAPPLICABLE
+
+**Applicability:**
+This dimension was not applicable for this run and is excluded from overall scoring.
+
+**Dissent Summary:**
+Not evaluated (dimension inapplicable).
+
+**Judge Opinions (All Three):**
+Not evaluated.
+
+**Dissent Details:**
+- Not evaluated.
+
+**Deterministic Resolution:**
+Dimension excluded due to runtime inputs (pdf_path missing and/or vision disabled).
+
+**File-level Remediation Targets:**
+(not applicable)
+"""
+            )
+            dissent_summaries.append(f"- `{criterion_id}`: INAPPLICABLE.")
+            continue
+
+        applicable_count += 1
         raw_ops = grouped.get(criterion_id, [])
         op_by_judge: Dict[str, JudicialOpinion] = {}
         for op in raw_ops:
@@ -681,6 +771,8 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
                 f"- Argument: {op.argument}\n"
                 f"- Cited Evidence: {refs}"
             )
+        if ops and all("judgerepair fallback opinion inserted" in (op.argument or "").lower() for op in ops):
+            fallback_only_dimensions += 1
 
         for note in fact_notes:
             dissent_lines.append(f"- **Fact Supremacy:** {note}")
@@ -701,10 +793,12 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
             final_score = security_cap
             dissent_lines.append(
                 f"- **Security Override**: Score capped at {security_cap} due to synthesis rule `security_override`."
-            )
+                )
 
         total += final_score
         count += 1
+        if not _has_judicial_trail(criterion_id, state.get("opinions", []) or [], state):
+            incomplete_dimension_ids.append(criterion_id)
 
         dissent_summary = _build_dissent_summary(ops, variance)
         dissent_summaries.append(f"- `{criterion_id}`: {dissent_summary}")
@@ -752,6 +846,19 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
         )
 
     avg = round(total / count) if count else 0
+    if applicable_count == 0:
+        blockers.append("No applicable dimensions were available for scoring in this run.")
+    if incomplete_dimension_ids:
+        blockers.append(
+            "Judicial outputs incomplete for applicable dimensions: "
+            + ", ".join(incomplete_dimension_ids)
+            + "."
+        )
+    if applicable_count > 0 and fallback_only_dimensions == applicable_count:
+        blockers.append(
+            "All applicable dimensions relied on JudgeRepair fallbacks; validated judge outputs were not produced."
+        )
+    incomplete_audit = (len(blockers) > 0) or (not required_layers_ran)
 
     evidence_summary = []
     for bucket, items in evidences.items():
@@ -762,12 +869,12 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
         remediation.append("- No urgent remediation required based on current scoring.")
 
     executive_extras: List[str] = []
-    executive_extras.append(f"- **Audit Status:** {'INCOMPLETE_AUDIT' if incomplete_audit else 'COMPLETE'}")
+    executive_extras.append(f"- **Audit Status:** {'INCOMPLETE_AUDIT' if incomplete_audit else 'COMPLETE_AUDIT'}")
     if contradiction_count:
         executive_extras.append(f"- **Judge Consistency Alerts:** {contradiction_count}")
     if "dissent_requirement" in rules:
         executive_extras.append(f"- **Dissent Requirement:** {rules.get('dissent_requirement')}")
-    executive_extras.append("- **Dimensions Covered:** 10/10 canonical IDs")
+    executive_extras.append(f"- **Dimensions Covered:** {applicable_count}/10 applicable ({inapplicable_count} inapplicable)")
 
     fact_supremacy_section = ""
     if "fact_supremacy" in rules:
@@ -782,7 +889,7 @@ def generate_markdown_report(state: AgentState, rules: dict) -> str:
 ## Executive Summary
 - **Repository:** {state.get("repo_url", "N/A")}
 - **PDF:** {state.get("pdf_path", "N/A") or "None"}
-- **Overall Score:** {"N/A (incomplete audit)" if incomplete_audit else f"{avg}/5"}
+- **Overall Score:** {"N/A (incomplete audit)" if incomplete_audit else (f"{avg}/5" if count else "N/A (no applicable dimensions)")}
 - **Evidence Coverage:**
 {chr(10).join(evidence_summary) if evidence_summary else "- No evidence collected."}
 {chr(10).join(executive_extras) if executive_extras else ""}

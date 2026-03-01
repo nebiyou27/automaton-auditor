@@ -59,11 +59,8 @@ def _normalize_judge(value: object, fallback: str) -> str:
 
 
 def _coerce_score(value: object, default: int = 3) -> int:
-    try:
-        score = int(value)
-    except (TypeError, ValueError):
-        return default
-    return max(1, min(5, score))
+    normalized = _normalize_score(value, default=default)
+    return max(1, min(5, normalized))
 
 
 def _coerce_cited_evidence(value: object) -> List[str]:
@@ -290,6 +287,134 @@ def _strip_think_and_noise(raw: str) -> str:
     return raw
 
 
+def _truncate(text: object, max_chars: int = 800) -> str:
+    value = str(text or "").replace("\n", " ").replace("\r", " ").strip()
+    return value[:max_chars]
+
+
+def _extract_response_text(payload: object) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    content = getattr(payload, "content", None)
+    if isinstance(content, str):
+        return content
+    if content is not None:
+        return str(content)
+    return str(payload)
+
+
+def _warn_validation_failure(
+    *,
+    judge: str,
+    dimension_id: str,
+    attempt: int,
+    snippet: object,
+) -> None:
+    print(
+        "[judge-validation-warning] "
+        f"judge={judge} dimension_id={dimension_id} attempt={attempt} "
+        f"snippet={_truncate(snippet, max_chars=800)}"
+    )
+
+
+def _normalize_score(value: object, default: int = 3) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return 1 if value else default
+    if isinstance(value, (int, float)):
+        number = float(value)
+        if number > 5:
+            number = (number / 10.0) * 5.0
+        return int(round(max(1.0, min(5.0, number))))
+
+    text = str(value).strip().lower()
+    if not text:
+        return default
+
+    patterns = [
+        r"(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)",
+        r"(-?\d+(?:\.\d+)?)\s*out\s+of\s*(-?\d+(?:\.\d+)?)",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        try:
+            num = float(m.group(1))
+            den = float(m.group(2))
+            if den > 0:
+                scaled = (num / den) * 5.0
+                return int(round(max(1.0, min(5.0, scaled))))
+        except Exception:
+            continue
+
+    m = re.search(r"(?:score\s*[:=]?\s*)?(-?\d+(?:\.\d+)?)", text, flags=re.IGNORECASE)
+    if not m:
+        return default
+    try:
+        number = float(m.group(1))
+    except Exception:
+        return default
+    if number > 5:
+        number = (number / 10.0) * 5.0
+    return int(round(max(1.0, min(5.0, number))))
+
+
+def _extract_first_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
+    cleaned = _strip_think_and_noise(raw_text)
+    if not cleaned:
+        return None
+
+    try:
+        direct = json.loads(cleaned)
+        if isinstance(direct, dict):
+            return direct
+        if isinstance(direct, list):
+            first_obj = next((x for x in direct if isinstance(x, dict)), None)
+            if first_obj is not None:
+                return first_obj
+    except Exception:
+        pass
+
+    start_indices = [i for i, ch in enumerate(cleaned) if ch == "{"]
+    for start in start_indices:
+        depth = 0
+        in_string = False
+        escaped = False
+        for idx in range(start, len(cleaned)):
+            ch = cleaned[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == "{":
+                depth += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = cleaned[start : idx + 1]
+                    try:
+                        parsed = json.loads(candidate)
+                    except Exception:
+                        break
+                    if isinstance(parsed, dict):
+                        return parsed
+                    break
+    return None
+
+
 def _is_positive_argument(text: str) -> bool:
     lowered = (text or "").lower()
     positives = [
@@ -334,10 +459,29 @@ def _coerce_opinion(op: object, persona: str, criterion_id: str) -> Optional[Jud
         return op
     if isinstance(op, dict):
         payload: Dict[str, Any] = dict(op)
+        if isinstance(payload.get("reasoning"), str) and not payload.get("argument"):
+            payload["argument"] = payload["reasoning"]
+        if isinstance(payload.get("justification"), str) and not payload.get("argument"):
+            payload["argument"] = payload["justification"]
+        if isinstance(payload.get("evidence"), list) and not payload.get("cited_evidence"):
+            payload["cited_evidence"] = payload["evidence"]
+        if isinstance(payload.get("citations"), list) and not payload.get("cited_evidence"):
+            payload["cited_evidence"] = payload["citations"]
         payload["judge"] = _normalize_judge(payload.get("judge"), persona)
         payload["criterion_id"] = criterion_id
-        payload["score"] = _coerce_score(payload.get("score"))
+        score_source = payload.get("score")
+        if score_source is None:
+            score_source = payload.get("score_text")
+        if score_source is None:
+            score_source = payload.get("rating")
+        payload["score"] = _normalize_score(score_source)
         payload["argument"] = str(payload.get("argument", "")).strip()
+        if (not payload["argument"]) and isinstance(payload.get("analysis"), str):
+            payload["argument"] = str(payload["analysis"]).strip()
+        if (not payload["argument"]) and isinstance(payload.get("commentary"), str):
+            payload["argument"] = str(payload["commentary"]).strip()
+        if score_source is None and payload["argument"]:
+            payload["score"] = _normalize_score(payload["argument"])
         payload["cited_evidence"] = _coerce_cited_evidence(payload.get("cited_evidence"))
         if not payload["argument"]:
             return None
@@ -350,18 +494,9 @@ def _coerce_opinion_from_raw_text(raw_text: str, persona: str, criterion_id: str
     if not cleaned:
         return None
 
-    try:
-        parsed = json.loads(cleaned)
-    except JSONDecodeError:
-        # Try to recover JSON object if the model adds extra wrapper text.
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            parsed = json.loads(cleaned[start : end + 1])
-        except JSONDecodeError:
-            return None
+    parsed = _extract_first_json_object(cleaned)
+    if parsed is None:
+        return None
 
     if isinstance(parsed, dict):
         # Common wrapper shapes produced by local models.
@@ -481,7 +616,8 @@ def _invoke_structured(
     allowed_refs: List[str],
     retries: int = 2,
 ) -> Tuple[Optional[JudicialOpinion], Optional[str]]:
-    _llm = _get_llm().with_structured_output(JudicialOpinion)
+    llm_base = _get_llm()
+    _llm = llm_base.with_structured_output(JudicialOpinion)
     last_error: Optional[str] = None
 
     for attempt in range(retries + 1):
@@ -496,6 +632,12 @@ def _invoke_structured(
             return op, None
         except Exception as e:
             last_error = str(e)
+            _warn_validation_failure(
+                judge=persona,
+                dimension_id=criterion_id,
+                attempt=attempt + 1,
+                snippet=locals().get("op_raw", e),
+            )
             if attempt < retries:
                 prompt = (
                     f"{prompt}\n\n"
@@ -504,7 +646,32 @@ def _invoke_structured(
                 )
                 continue
             break
-    return None, last_error or "Unknown schema validation failure."
+
+    raw_attempt = retries + 2
+    try:
+        raw_response = llm_base.invoke(prompt)
+        raw_text = _extract_response_text(raw_response)
+        repaired = _coerce_opinion_from_raw_text(raw_text, persona, criterion_id)
+        if repaired is not None:
+            repaired.cited_evidence = _normalize_citations(repaired.cited_evidence, allowed_refs)
+            if _is_score_argument_inconsistent(repaired.score, repaired.argument):
+                raise ValueError("Schema validation failed: score/argument inconsistency (sanitized fallback).")
+            return repaired, None
+        _warn_validation_failure(
+            judge=persona,
+            dimension_id=criterion_id,
+            attempt=raw_attempt,
+            snippet=raw_text,
+        )
+        return None, "Sanitized raw-text fallback could not produce valid JudicialOpinion."
+    except Exception as e:
+        _warn_validation_failure(
+            judge=persona,
+            dimension_id=criterion_id,
+            attempt=raw_attempt,
+            snippet=e,
+        )
+        return None, last_error or str(e) or "Unknown schema validation failure."
 
 
 def _run_batched_judge(persona: str, persona_system: str, state: AgentState) -> List[JudicialOpinion]:
